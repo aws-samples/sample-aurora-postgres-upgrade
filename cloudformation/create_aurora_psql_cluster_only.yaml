@@ -1,1 +1,345 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Aurora PostgreSQL cluster with maintenance user secret for upgrade automation testing'
 
+Parameters:
+  ClusterIdentifier:
+    Type: String
+    Description: Aurora cluster identifier
+    Default: aurora-psql-test-cluster
+    
+  DatabaseName:
+    Type: String
+    Description: Initial database name
+    Default: testdb
+    
+  MasterUsername:
+    Type: String
+    Description: Master username for Aurora cluster
+    Default: postgres
+    
+  EngineVersion:
+    Type: String
+    Description: Aurora PostgreSQL engine version
+    Default: '16.3'
+    AllowedValues:
+      - '16.3'
+      - '16.4'
+      - '16.6'
+      - '16.8'
+      - '16.9'
+      - '17.4'
+      - '17.5'
+
+  InstanceClass:
+    Type: String
+    Description: Aurora instance class
+    Default: db.r6g.large
+    AllowedValues:
+      - db.r6g.large
+      - db.r6g.xlarge
+      - db.r6g.2xlarge
+      - db.r5.large
+      - db.r5.xlarge
+      - db.r5.2xlarge
+    
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for Aurora cluster
+    
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet IDs for Aurora cluster (minimum 2 in different AZs)
+    
+  AllowedCidr:
+    Type: String
+    Description: CIDR block allowed to connect to Aurora cluster
+    Default: 10.0.0.0/16
+
+Resources:
+  # Aurora Cluster Parameter Group
+  AuroraClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: !Sub 'Aurora PostgreSQL ${EngineVersion} cluster parameter group for upgrade automation'
+      Family: !Sub 
+        - 'aurora-postgresql${MajorVersion}'
+        - MajorVersion: !Select [0, !Split ['.', !Ref EngineVersion]]
+      Parameters:
+        # Logging and statement parameters (cluster-level)
+        log_statement: 'all'
+        log_min_duration_statement: '1000'
+        shared_preload_libraries: 'pg_stat_statements'
+        # Replication parameters (cluster-level)
+        rds.logical_replication: '1'
+        max_wal_senders: '10'
+        max_replication_slots: '10'
+        # Connection parameters (cluster-level)
+        max_connections: '200'
+        # Autovacuum parameters (cluster-level in Aurora PostgreSQL)
+        autovacuum_max_workers: '3'
+        autovacuum_naptime: '15'
+        log_autovacuum_min_duration: '0'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterIdentifier}-cluster-param-group'
+        - Key: Purpose
+          Value: 'Aurora PostgreSQL upgrade automation'
+        - Key: UpgradeDB
+          Value: 'Y'
+
+  # DB Instance Parameter Group
+  AuroraInstanceParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Sub 'Aurora PostgreSQL ${EngineVersion} instance parameter group for upgrade automation'
+      Family: !Sub 
+        - 'aurora-postgresql${MajorVersion}'
+        - MajorVersion: !Select [0, !Split ['.', !Ref EngineVersion]]
+      Parameters:
+        # Memory parameters (instance-level, based on instance class)
+        shared_buffers: '{DBInstanceClassMemory/32768}'
+        effective_cache_size: '{DBInstanceClassMemory/16384}'
+        maintenance_work_mem: '2097152'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterIdentifier}-instance-param-group'
+        - Key: Purpose
+          Value: 'Aurora PostgreSQL upgrade automation'
+        - Key: UpgradeDB
+          Value: 'Y'
+
+  # DB Subnet Group
+  AuroraSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for Aurora PostgreSQL cluster
+      DBSubnetGroupName: !Sub '${ClusterIdentifier}-subnet-group'
+      SubnetIds: !Ref SubnetIds
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterIdentifier}-subnet-group'
+        - Key: Purpose
+          Value: 'Aurora PostgreSQL upgrade automation'
+
+  # Security Group for Aurora Cluster
+  AuroraSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Aurora PostgreSQL cluster
+      GroupName: !Sub '${ClusterIdentifier}-sg'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref AllowedCidr
+          Description: 'PostgreSQL access from allowed CIDR'
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: 'All outbound traffic'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterIdentifier}-sg'
+        - Key: Purpose
+          Value: 'Aurora PostgreSQL upgrade automation'  
+# Master User Password Secret
+  MasterUserSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ClusterIdentifier}-master-user-secret'
+      Description: 'Master user credentials for Aurora PostgreSQL cluster'
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${MasterUsername}"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterIdentifier}-master-user-secret'
+        - Key: Purpose
+          Value: 'Aurora PostgreSQL upgrade automation'
+
+  # Maintenance User Secret
+  MaintenanceUserSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ClusterIdentifier}-maintenance-user-secret'
+      Description: 'Maintenance user credentials for Aurora PostgreSQL cluster upgrade automation'
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "aurora_maintenance_user"}'
+        GenerateStringKey: "password"
+        PasswordLength: 18
+        ExcludeCharacters: '"@/\'
+        ExcludePunctuation: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterIdentifier}-maintenance-user-secret'
+        - Key: Purpose
+          Value: 'Aurora PostgreSQL upgrade automation'
+        - Key: aurora-maintenance-user-secret
+          Value: !Sub '${ClusterIdentifier}-maintenance-user-secret'
+
+  # Enhanced Monitoring Role
+  EnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ClusterIdentifier}-enhanced-monitoring-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole'
+      Path: /
+      
+  # Aurora PostgreSQL Cluster
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Delete
+    Properties:
+      DBClusterIdentifier: !Ref ClusterIdentifier
+      Engine: aurora-postgresql
+      EngineVersion: !Ref EngineVersion
+      Port: 5432
+      DatabaseName: !Ref DatabaseName
+      MasterUsername: !Ref MasterUsername
+      ManageMasterUserPassword: true
+      MasterUserSecret:
+        SecretArn: !Ref MasterUserSecret
+      DBClusterParameterGroupName: !Ref AuroraClusterParameterGroup
+      DBSubnetGroupName: !Ref AuroraSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref AuroraSecurityGroup
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      EnableCloudwatchLogsExports:
+        - postgresql
+      StorageEncrypted: true
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Ref ClusterIdentifier
+        - Key: Purpose
+          Value: 'Aurora PostgreSQL upgrade automation'
+        - Key: UpgradeDB
+          Value: 'Y'
+        - Key: aurora-maintenance-user-secret
+          Value: !Sub '${ClusterIdentifier}-maintenance-user-secret'
+          
+  # Aurora Writer Instance
+  AuroraWriterInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${ClusterIdentifier}-1'
+      DBInstanceClass: !Ref InstanceClass
+      Engine: aurora-postgresql
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBParameterGroupName: !Ref AuroraInstanceParameterGroup
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt EnhancedMonitoringRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterIdentifier}-1'
+        - Key: Purpose
+          Value: 'Aurora PostgreSQL upgrade automation'
+        - Key: UpgradeDB
+          Value: 'Y'
+
+  # Aurora Reader Instance
+  AuroraReaderInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${ClusterIdentifier}-2'
+      DBInstanceClass: !Ref InstanceClass
+      Engine: aurora-postgresql
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBParameterGroupName: !Ref AuroraInstanceParameterGroup
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt EnhancedMonitoringRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterIdentifier}-2'
+        - Key: Purpose
+          Value: 'Aurora PostgreSQL upgrade automation'
+        - Key: UpgradeDB
+          Value: 'Y'
+
+Outputs:
+
+  ClusterIdentifier:
+    Description: Aurora cluster identifier
+    Value: !Ref AuroraCluster
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterIdentifier'
+      
+  ClusterEndpoint:
+    Description: Aurora cluster endpoint
+    Value: !GetAtt AuroraCluster.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterEndpoint'
+      
+  ReaderEndpoint:
+    Description: Aurora cluster reader endpoint
+    Value: !GetAtt AuroraCluster.ReadEndpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-ReaderEndpoint'
+      
+  ClusterPort:
+    Description: Aurora cluster port
+    Value: !GetAtt AuroraCluster.Endpoint.Port
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterPort'
+      
+  WriterInstanceId:
+    Description: Aurora writer instance identifier
+    Value: !Ref AuroraWriterInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-WriterInstanceId'
+      
+  ReaderInstanceId:
+    Description: Aurora reader instance identifier
+    Value: !Ref AuroraReaderInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-ReaderInstanceId'
+      
+  MasterUserSecretArn:
+    Description: ARN of the master user secret
+    Value: !Ref MasterUserSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-MasterUserSecretArn'
+      
+  MaintenanceUserSecretArn:
+    Description: ARN of the maintenance user secret
+    Value: !Ref MaintenanceUserSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-MaintenanceUserSecretArn'
+      
+  SecurityGroupId:
+    Description: Security group ID for Aurora cluster
+    Value: !Ref AuroraSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroupId'
+      
+  ClusterParameterGroupName:
+    Description: Aurora cluster parameter group name
+    Value: !Ref AuroraClusterParameterGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterParameterGroupName'
+      
+  InstanceParameterGroupName:
+    Description: Aurora instance parameter group name
+    Value: !Ref AuroraInstanceParameterGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceParameterGroupName'

@@ -1,0 +1,706 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create complete Aurora PostgreSQL testing environment with VPC, NAT Gateway, and all required components
+
+Parameters:
+  ClusterIdentifier:
+    Type: String
+    Default: aurora-cluster-test-1
+    Description: Aurora cluster identifier
+
+  MasterUsername:
+    Type: String
+    Description: Username for Aurora master user
+    Default: postgres
+    NoEcho: true
+    MinLength: 1
+    MaxLength: 16
+    AllowedPattern: ^[a-zA-Z][a-zA-Z0-9]*$
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters
+
+  EngineVersion:
+    Type: String
+    Description: Aurora PostgreSQL engine version
+    Default: '16.3'
+    AllowedValues:
+      - '16.3'
+      - '16.4'
+      - '16.6'
+      - '16.8'
+      - '16.9'
+      - '17.4'
+      - '17.5'
+
+  InstanceClass:
+    Type: String
+    Description: Aurora instance class
+    Default: db.r6g.large
+    AllowedValues:
+      - db.r6g.large
+      - db.r6g.xlarge
+      - db.r6g.2xlarge
+      - db.r5.large
+      - db.r5.xlarge
+      - db.r5.2xlarge
+
+  EnvironmentName:
+    Type: String
+    Default: aurora-patch-test-env
+    Description: Environment name prefix for resources
+
+  VpcCIDR:
+    Type: String
+    Default: 10.20.0.0/16
+    Description: CIDR block for VPC
+
+  PublicSubnet1CIDR:
+    Type: String
+    Default: 10.20.1.0/24
+    Description: CIDR block for public subnet 1
+
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: 10.20.2.0/24
+    Description: CIDR block for private subnet 1
+
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: 10.20.3.0/24
+    Description: CIDR block for private subnet 2
+
+  BucketNamePrefix:
+    Type: String
+    Default: aurora-patch-test-scripts
+    Description: Prefix for S3 bucket name
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+
+  SnsEmailAddress:
+    Type: String
+    Description: Email address for SNS topic subscription
+    AllowedPattern: ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid email address
+
+Resources:
+  # VPC and Networking Components
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-IGW
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PublicSubnet1
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PrivateSubnet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PrivateSubnet2
+
+  # NAT Gateway Configuration
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-NatGW
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PublicRT
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PrivateRT
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  # Security Groups
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2 instance
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref VpcCIDR
+          Description: Management access
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref VpcCIDR
+          Description: Management access
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS outbound for SSM
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTP outbound for package updates
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-EC2-SG
+
+  AuroraSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Aurora cluster
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+          Description: Aurora access from EC2
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+          Description: Outbound access
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Aurora-SG
+
+  # SNS Topic
+  AuroraUpgradeTestSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${EnvironmentName}-AuroraUpgradeTestSnsTopic
+      KmsMasterKeyId: alias/aws/sns
+
+  AuroraUpgradeTestSnsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecure
+            Effect: Deny
+            Principal: '*'
+            Action: 'sns:Publish'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+            Resource:
+              - !Ref AuroraUpgradeTestSnsTopic
+      Topics:
+        - !Ref AuroraUpgradeTestSnsTopic
+
+  AuroraUpgradeTestSnsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AuroraUpgradeTestSnsTopic
+      Protocol: email
+      Endpoint: !Ref SnsEmailAddress
+
+  # S3 Bucket
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${BucketNamePrefix}-${AWS::Region}-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Sid: DenyInsecureAccess
+          Action: "*"
+          Effect: Deny
+          Resource:
+            - !Sub arn:aws:s3:::${S3Bucket}
+            - !Sub arn:aws:s3:::${S3Bucket}/*
+          Condition:
+            Bool:
+              "aws:SecureTransport": false
+          Principal: "*"
+
+  # IAM Roles and Policies
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: AuroraUpgradeInstancePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBEngineVersions
+                  - rds:DescribeOrderableDBInstanceOptions
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                  - rds:ModifyDBCluster
+                  - rds:ModifyDBInstance
+                  - rds:RebootDBInstance
+                  - rds:CreateDBClusterSnapshot
+                  - rds:DescribeDBClusterSnapshots
+                  - rds:RestoreDBClusterFromSnapshot
+                  - rds:DescribeDBClusterParameterGroups
+                  - rds:CreateDBClusterParameterGroup
+                  - rds:ModifyDBClusterParameterGroup
+                  - rds:DescribeDBParameterGroups
+                  - rds:CreateDBParameterGroup
+                  - rds:ModifyDBParameterGroup
+                  - rds:DescribeDBClusterParameters
+                  - rds:DescribeDBParameters
+                  - rds:DescribePendingMaintenanceActions
+                  - rds:ApplyPendingMaintenanceAction
+                  - rds:AddTagsToResource
+                  - rds:ListTagsForResource
+                Resource:
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:*
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:*
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-pg:*
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:pg:*
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:*
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${S3Bucket}
+                  - !Sub arn:aws:s3:::${S3Bucket}/*
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref AuroraUpgradeTestSnsTopic
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ClusterIdentifier}*
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  # Enhanced Monitoring Role
+  EnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ClusterIdentifier}-enhanced-monitoring-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole'
+      Path: /
+
+  # EC2 Instance
+  ToolsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      EbsOptimized: true
+      IamInstanceProfile: !Ref InstanceProfile
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.micro
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      SubnetId: !Ref PrivateSubnet1
+      UserData: !Base64 |
+        #!/bin/bash
+        yum update -y
+        yum install -y postgresql15 jq awscli bc
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ToolsInstance
+
+  # Aurora Components
+  AuroraSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Aurora VPC Subnet Group
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-AuroraSubnetGroup
+
+  AuroraClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: !Sub 'Aurora PostgreSQL ${EngineVersion} cluster parameter group for upgrade automation'
+      Family: !Sub
+        - 'aurora-postgresql${MajorVersion}'
+        - MajorVersion: !Select [0, !Split ['.', !Ref EngineVersion]]
+      Parameters:
+        log_statement: 'all'
+        log_min_duration_statement: '1000'
+        shared_preload_libraries: 'pg_stat_statements'
+        rds.logical_replication: '1'
+        max_wal_senders: '10'
+        max_replication_slots: '10'
+        max_connections: '200'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterIdentifier}-cluster-param-group
+
+  AuroraInstanceParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Sub 'Aurora PostgreSQL ${EngineVersion} instance parameter group for upgrade automation'
+      Family: !Sub
+        - 'aurora-postgresql${MajorVersion}'
+        - MajorVersion: !Select [0, !Split ['.', !Ref EngineVersion]]
+      Parameters:
+        shared_buffers: '{DBInstanceClassMemory/32768}'
+        effective_cache_size: '{DBInstanceClassMemory/16384}'
+        maintenance_work_mem: '2097152'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterIdentifier}-instance-param-group
+
+  MasterUserSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ClusterIdentifier}-master-user-secret'
+      Description: 'Master user credentials for Aurora PostgreSQL cluster'
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${MasterUsername}"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+
+  MaintenanceUserSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ClusterIdentifier}-maintenance-user-secret
+      Description: "Maintenance user credentials for Aurora PostgreSQL cluster"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "aurora_maintenance_user"}'
+        GenerateStringKey: "password"
+        PasswordLength: 18
+        ExcludeCharacters: '"@/\'''
+        ExcludePunctuation: true
+
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Delete
+    Properties:
+      DBClusterIdentifier: !Ref ClusterIdentifier
+      Engine: aurora-postgresql
+      EngineVersion: !Ref EngineVersion
+      Port: 5432
+      DatabaseName: testdb
+      MasterUsername: !Ref MasterUsername
+      ManageMasterUserPassword: true
+      MasterUserSecret:
+        SecretArn: !Ref MasterUserSecret
+      DBClusterParameterGroupName: !Ref AuroraClusterParameterGroup
+      DBSubnetGroupName: !Ref AuroraSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref AuroraSecurityGroup
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      EnableCloudwatchLogsExports:
+        - postgresql
+      StorageEncrypted: true
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Ref ClusterIdentifier
+        - Key: UpgradeDB
+          Value: Y
+        - Key: Environment
+          Value: Test
+        - Key: aurora-maintenance-user-secret
+          Value: !Sub ${ClusterIdentifier}-maintenance-user-secret
+
+  AuroraWriterInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${ClusterIdentifier}-1'
+      DBInstanceClass: !Ref InstanceClass
+      Engine: aurora-postgresql
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBParameterGroupName: !Ref AuroraInstanceParameterGroup
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt EnhancedMonitoringRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterIdentifier}-1'
+        - Key: UpgradeDB
+          Value: Y
+
+  # VPC Endpoints
+  S3GatewayEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      VpcEndpointType: 'Gateway'
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub 'arn:aws:s3:::${BucketNamePrefix}-${AWS::Region}-${AWS::AccountId}/*'
+              - !Sub 'arn:aws:s3:::${BucketNamePrefix}-${AWS::Region}-${AWS::AccountId}'
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - s3:GetObject
+            Resource:
+              - !Sub 'arn:aws:s3:::al2023-repos-${AWS::Region}-de612dc2/*'
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for VPC Endpoints
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCIDR
+          Description: HTTPS from VPC CIDR
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-VPCEndpoint-SG
+
+  SSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  SSMMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  EC2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2messages
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+Outputs:
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+
+  PublicSubnet1:
+    Description: Public Subnet 1 ID
+    Value: !Ref PublicSubnet1
+
+  PrivateSubnet1:
+    Description: Private Subnet 1 ID
+    Value: !Ref PrivateSubnet1
+
+  PrivateSubnet2:
+    Description: Private Subnet 2 ID
+    Value: !Ref PrivateSubnet2
+
+  S3BucketName:
+    Description: S3 Bucket Name
+    Value: !Ref S3Bucket
+
+  SnsTopicArn:
+    Description: SNS Topic ARN
+    Value: !Ref AuroraUpgradeTestSnsTopic
+
+  EC2InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref ToolsInstance
+
+  ClusterIdentifier:
+    Description: Aurora cluster identifier
+    Value: !Ref AuroraCluster
+
+  ClusterEndpoint:
+    Description: Aurora cluster endpoint
+    Value: !GetAtt AuroraCluster.Endpoint.Address
+
+  ReaderEndpoint:
+    Description: Aurora cluster reader endpoint
+    Value: !GetAtt AuroraCluster.ReadEndpoint.Address
+
+  ClusterPort:
+    Description: Aurora cluster port
+    Value: !GetAtt AuroraCluster.Endpoint.Port
+
+  WriterInstanceId:
+    Description: Aurora writer instance identifier
+    Value: !Ref AuroraWriterInstance
+
+  MasterUserSecretArn:
+    Description: ARN of the master user secret
+    Value: !Ref MasterUserSecret
+
+  MaintenanceUserSecretArn:
+    Description: ARN of the maintenance user secret
+    Value: !Ref MaintenanceUserSecret

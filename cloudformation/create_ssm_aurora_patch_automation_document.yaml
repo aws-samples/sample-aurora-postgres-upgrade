@@ -1,0 +1,388 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for Aurora PostgreSQL Fleet Upgrade Automation Document'
+
+Resources:
+
+  AutomationServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AuroraPostgreSQL-fleet-upgrade-automation-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonSSMAutomationRole
+      Policies:
+        - PolicyName: AuroraUpgradeAutomationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                  - rds:ModifyDBCluster
+                  - rds:ModifyDBInstance
+                  - rds:RebootDBInstance
+                  - rds:CreateDBClusterSnapshot
+                  - rds:DescribeDBClusterSnapshots
+                  - rds:DescribeDBSnapshots
+                  - rds:RestoreDBClusterToPointInTime
+                  - rds:DescribeDBEngineVersions
+                  - rds:DescribeOrderableDBInstanceOptions
+                  - rds:DescribeDBParameterGroups
+                  - rds:DescribeDBClusterParameterGroups
+                  - rds:CreateDBParameterGroup
+                  - rds:CreateDBClusterParameterGroup
+                  - rds:ModifyDBParameterGroup
+                  - rds:ModifyDBClusterParameterGroup
+                  - rds:DescribeDBParameters
+                  - rds:DescribeDBClusterParameters
+                  - rds:DescribePendingMaintenanceActions
+                  - rds:ApplyPendingMaintenanceAction
+                  - rds:AddTagsToResource
+                  - rds:ListTagsForResource
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: '*'
+
+  AuroraPostgreSQLFleetUpgrade:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: Aurora-PostgreSQL-Fleet-Upgrade
+      DocumentType: Automation
+      Content:
+        schemaVersion: '0.3'
+        description: Upgrade fleet of Aurora PostgreSQL clusters
+        parameters:
+          ScriptsDirOnEC2:
+            type: String
+            description: The directory where scripts will be stored
+            default: /tmp/aurora_patch
+          AssumeIAMRole:
+            type: String
+            description: The ARN of the role that allows Automation to perform the actions on your behalf.
+            default: !GetAtt AutomationServiceRole.Arn
+          EC2InstanceId:
+            type: String
+            description: The ID of the existing EC2 Instance
+          RunPreUpgradeTasks:
+            type: String
+            description: Whether to run pre-upgrade tasks (PREUPGRADE) or upgrade tasks (UPGRADE)
+            default: PREUPGRADE
+            allowedValues:
+              - PREUPGRADE
+              - UPGRADE
+          SnsTopicArnEmail:
+            type: String
+            description: SNS Topic ARN for email notifications
+            default: ""
+          S3BucketName:
+            type: String
+            description: Name of the S3 bucket containing the shell script and related log files can be stored
+            default: ""
+          S3ScriptKey:
+            type: String
+            description: The S3 key (path) to the shell script
+            default: aurora_psql_patch.sh
+          AuroraClusterTagValue:
+            type: String
+            description: The tag value to identify Aurora PostgreSQL clusters
+            default: 'Y'
+          AuroraClusterTagKey:
+            type: String
+            description: The tag key to identify Aurora PostgreSQL clusters
+            default: UpgradeDB
+          TargetEngineVersion:
+            type: String
+            description: Target Engine Version (Sample value 16.3)
+        assumeRole: '{{ AssumeIAMRole }}'
+        mainSteps:
+          - name: DownloadAndSaveScript
+            action: aws:runCommand
+            nextStep: UpgradeAuroraClusters
+            isEnd: false
+            onFailure: Abort
+            timeoutSeconds: 300
+            inputs:
+              DocumentName: AWS-RunShellScript
+              InstanceIds:
+                - '{{ EC2InstanceId }}'
+              Parameters:
+                commands:
+                  - |
+                    #!/bin/bash
+                    set -euo pipefail
+                    # e: exits on error
+                    # u: exits on undefined variables
+                    # o pipefail: exits if any command in a pipe fails
+
+                    # Debug information
+                    # echo "Current user: $(whoami)"
+                    # echo "Home directory: $HOME"
+
+                    # Setup environment
+                    export AWS_REGION="{{ global:REGION }}"
+                    export AWS_DEFAULT_REGION="{{ global:REGION }}"
+                    export RunPreUpgradeTasks="{{ RunPreUpgradeTasks }}"
+
+                    # Create directory
+                    mkdir -p {{ ScriptsDirOnEC2 }}
+
+                    # Download file
+                    aws s3 cp s3://{{ S3BucketName }}/{{ S3ScriptKey }} {{ ScriptsDirOnEC2 }}/aurora_psql_patch.sh
+
+                    # Make script executable
+                    chmod +x {{ ScriptsDirOnEC2 }}/aurora_psql_patch.sh
+
+                    # Verify final state
+                    echo "Final script permissions:"
+                    ls -la {{ ScriptsDirOnEC2 }}/aurora_psql_patch.sh
+
+          - name: UpgradeAuroraClusters
+            action: aws:runCommand
+            isEnd: true
+            onFailure: Abort
+            timeoutSeconds: 14400
+            inputs:
+              DocumentName: AWS-RunShellScript
+              InstanceIds:
+                - '{{ EC2InstanceId }}'
+              Parameters:
+                commands:
+                  - |
+                    #!/bin/bash
+                    set -euo pipefail
+
+                    # Setup environment
+                    export AWS_REGION="{{ global:REGION }}"
+                    export AWS_DEFAULT_REGION="{{ global:REGION }}"
+                    export RunPreUpgradeTasks="{{ RunPreUpgradeTasks }}"
+
+                    # Create logs directory with timestamp suffix
+                    TIMESTAMP=$(date '+%Y%m%d-%H-%M-%S')
+                    LOGS_DIR="{{ ScriptsDirOnEC2 }}/logs"
+                    MASTER_LOG="${LOGS_DIR}/${RunPreUpgradeTasks}-master-${TIMESTAMP}.log"
+                    mkdir -p "${LOGS_DIR}"
+
+                    # Store cluster list in a file to ensure consistency
+                    CLUSTER_LIST_FILE="${LOGS_DIR}/${RunPreUpgradeTasks}-cluster_list.txt"
+
+                    log_message() {
+                        local cluster="$1"
+                        local message="$2"
+                        local log_file="$3"
+                        local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+                        echo "[${timestamp}] [${cluster}] ${message}" | tee -a "${log_file}"
+                    }
+
+                    export TAG_KEY="{{ AuroraClusterTagKey }}"
+                    export TAG_VALUE="{{ AuroraClusterTagValue }}"
+                    
+                    # Discover Aurora PostgreSQL clusters using describe-db-clusters with proper filtering
+                    log_message "MASTER" "Discovering Aurora PostgreSQL clusters with tag ${TAG_KEY}=${TAG_VALUE}" "${MASTER_LOG}"
+                    
+                    aws rds describe-db-clusters --output json | \
+                      jq -r --arg key "$TAG_KEY" --arg value "$TAG_VALUE" \
+                        '.DBClusters[] | 
+                         select(.Engine == "aurora-postgresql") | 
+                         select(.TagList[]? | select(.Key==$key and .Value==$value)) | 
+                         .DBClusterIdentifier' \
+                      > "${CLUSTER_LIST_FILE}"
+                    
+                    # Validate that clusters were found
+                    if [ ! -s "${CLUSTER_LIST_FILE}" ]; then
+                      log_message "MASTER" "ERROR: No Aurora PostgreSQL clusters found with tag ${TAG_KEY}=${TAG_VALUE}" "${MASTER_LOG}"
+                      exit 1
+                    fi
+
+                    CLUSTERS=$(cat "${CLUSTER_LIST_FILE}")
+                    log_message "MASTER" "Found Aurora clusters to upgrade: ${CLUSTERS}" "${MASTER_LOG}"
+
+                    COUNT=0
+                    declare -a PIDS=()
+
+                    cleanup() {
+                      log_message "MASTER" "Cleaning up background processes..." "${MASTER_LOG}"
+                      for pid in "${PIDS[@]}"; do
+                        kill -9 $pid 2>/dev/null || true
+                      done
+                      exit 1
+                    }
+
+                    trap cleanup SIGINT SIGTERM
+
+                    export SCRIPTS_DIR="{{ ScriptsDirOnEC2 }}"
+                    export S3_BUCKET_PATCH_LOGS="{{ S3BucketName }}"
+                    export SNS_TOPIC_ARN_EMAIL="{{ SnsTopicArnEmail }}"
+
+                    while IFS= read -r CLUSTER || [[ -n "$CLUSTER" ]]; do
+                      # Skip empty lines
+                      [ -z "$CLUSTER" ] && continue
+                      
+                      CLUSTER_LOG_DIR="${LOGS_DIR}/${CLUSTER}"
+                      mkdir -p "${CLUSTER_LOG_DIR}"
+                      CLUSTER_LOG="${CLUSTER_LOG_DIR}/${RunPreUpgradeTasks}-${TIMESTAMP}.log"
+
+                      (
+                        cd "${SCRIPTS_DIR}"
+                        log_message "${CLUSTER}" "Starting Aurora cluster ${RunPreUpgradeTasks} process" "${CLUSTER_LOG}"
+                        log_message "${CLUSTER}" "Target engine version: {{ TargetEngineVersion }}" "${CLUSTER_LOG}"
+                        
+                        # Validate cluster exists and is Aurora PostgreSQL before processing
+                        CLUSTER_INFO=$(aws rds describe-db-clusters --db-cluster-identifier "${CLUSTER}" --output json 2>/dev/null || echo "")
+                        if [ -z "$CLUSTER_INFO" ]; then
+                          log_message "${CLUSTER}" "ERROR: Aurora cluster not found or not accessible" "${CLUSTER_LOG}"
+                          echo "FAILED" > "${CLUSTER_LOG_DIR}/${RunPreUpgradeTasks}-status"
+                          exit 1
+                        fi
+                        
+                        CLUSTER_ENGINE=$(echo "$CLUSTER_INFO" | jq -r '.DBClusters[0].Engine // empty')
+                        if [ "$CLUSTER_ENGINE" != "aurora-postgresql" ]; then
+                          log_message "${CLUSTER}" "ERROR: Cluster is not Aurora PostgreSQL (engine: $CLUSTER_ENGINE)" "${CLUSTER_LOG}"
+                          echo "FAILED" > "${CLUSTER_LOG_DIR}/${RunPreUpgradeTasks}-status"
+                          exit 1
+                        fi
+                        
+                        # Execute Aurora upgrade script
+                        if ./aurora_psql_patch.sh "${CLUSTER}" "{{ TargetEngineVersion }}" "{{ RunPreUpgradeTasks }}" >> "${CLUSTER_LOG}" 2>&1; then
+                          log_message "${CLUSTER}" "Aurora cluster ${RunPreUpgradeTasks} completed successfully" "${CLUSTER_LOG}"
+                          echo "SUCCESS" > "${CLUSTER_LOG_DIR}/${RunPreUpgradeTasks}-status"
+                        else
+                          log_message "${CLUSTER}" "Aurora cluster ${RunPreUpgradeTasks} failed" "${CLUSTER_LOG}"
+                          echo "FAILED" > "${CLUSTER_LOG_DIR}/${RunPreUpgradeTasks}-status"
+                          exit 1
+                        fi
+                      ) &
+                      PIDS+=($!)
+                      COUNT=$((COUNT+1))
+                      log_message "MASTER" "Started ${RunPreUpgradeTasks} process for Aurora cluster ${CLUSTER} with PID ${PIDS[-1]}" "${MASTER_LOG}"
+                      
+                      # Add small delay between cluster processing starts to avoid overwhelming AWS APIs
+                      sleep 2
+                    done < "${CLUSTER_LIST_FILE}"
+
+                    EXIT_STATUS=0
+                    FAILED_CLUSTERS=""
+
+                    for pid in "${PIDS[@]}"; do
+                      if ! wait $pid; then
+                        EXIT_STATUS=1
+                      fi
+                    done
+
+                    log_message "MASTER" "Aurora cluster ${RunPreUpgradeTasks} initiated for $COUNT clusters" "${MASTER_LOG}"
+
+                    # Logging summary for each Aurora cluster
+                    while IFS= read -r CLUSTER || [[ -n "$CLUSTER" ]]; do
+                      # Skip empty lines
+                      [ -z "$CLUSTER" ] && continue
+                      
+                      CLUSTER_LOG_DIR="${LOGS_DIR}/${CLUSTER}"
+                      CLUSTER_LOG="${CLUSTER_LOG_DIR}/${RunPreUpgradeTasks}-${TIMESTAMP}.log"
+                      
+                      if [ -f "${CLUSTER_LOG}" ]; then
+                        log_message "MASTER" "" "${MASTER_LOG}"
+                        log_message "MASTER" "===== Log summary for Aurora cluster: ${CLUSTER} =====" "${MASTER_LOG}"
+                        
+                        # Extract Aurora-specific log entries
+                        while IFS= read -r line; do
+                          log_message "MASTER" "$line" "${MASTER_LOG}"
+                        done < <(egrep "INFO|ERROR|IMPORTANT|WARN|CLUSTER|AURORA" "${CLUSTER_LOG}" | egrep -v -i "vacuuming|pages|scanned|analyzing" || true)
+                        
+                        log_message "MASTER" "===== End of log summary for Aurora cluster: ${CLUSTER} =====" "${MASTER_LOG}"
+                        log_message "MASTER" "" "${MASTER_LOG}"
+
+                        # Check Aurora cluster status
+                        if [ -f "${CLUSTER_LOG_DIR}/${RunPreUpgradeTasks}-status" ]; then
+                          STATUS=$(cat "${CLUSTER_LOG_DIR}/${RunPreUpgradeTasks}-status")
+                          if [ "${STATUS}" = "FAILED" ]; then
+                            FAILED_CLUSTERS="${FAILED_CLUSTERS} ${CLUSTER}"
+                            log_message "MASTER" "Aurora cluster ${CLUSTER}: ${RunPreUpgradeTasks} FAILED" "${MASTER_LOG}"
+                          else
+                            log_message "MASTER" "Aurora cluster ${CLUSTER}: ${RunPreUpgradeTasks} SUCCESS" "${MASTER_LOG}"
+                          fi
+                        else
+                          FAILED_CLUSTERS="${FAILED_CLUSTERS} ${CLUSTER}"
+                          log_message "MASTER" "Aurora cluster ${CLUSTER}: ${RunPreUpgradeTasks} STATUS UNKNOWN" "${MASTER_LOG}"
+                        fi
+                      else
+                        log_message "MASTER" "" "${MASTER_LOG}"
+                        log_message "MASTER" "WARNING: Log file not found for Aurora cluster ${CLUSTER}: ${CLUSTER_LOG}" "${MASTER_LOG}"
+                        log_message "MASTER" "" "${MASTER_LOG}"
+                        FAILED_CLUSTERS="${FAILED_CLUSTERS} ${CLUSTER}"
+                      fi
+                    done < "${CLUSTER_LIST_FILE}"
+
+                    # Final status summary for Aurora fleet
+                    log_message "MASTER" "" "${MASTER_LOG}"
+                    log_message "MASTER" "========== AURORA FLEET ${RunPreUpgradeTasks} SUMMARY ==========" "${MASTER_LOG}"
+                    log_message "MASTER" "Total Aurora clusters processed: $COUNT" "${MASTER_LOG}"
+                    
+                    if [ $EXIT_STATUS -eq 0 ] && [ -z "${FAILED_CLUSTERS}" ]; then
+                      log_message "MASTER" "INFO: All Aurora cluster ${RunPreUpgradeTasks} tasks completed successfully" "${MASTER_LOG}"
+                      log_message "MASTER" "Status: SUCCESS" "${MASTER_LOG}"
+                    else
+                      FAILED_COUNT=$(echo "${FAILED_CLUSTERS}" | wc -w)
+                      SUCCESS_COUNT=$((COUNT - FAILED_COUNT))
+                      log_message "MASTER" "ERROR: Some Aurora cluster ${RunPreUpgradeTasks} tasks failed" "${MASTER_LOG}"
+                      log_message "MASTER" "Successful clusters: ${SUCCESS_COUNT}" "${MASTER_LOG}"
+                      log_message "MASTER" "Failed clusters: ${FAILED_COUNT}" "${MASTER_LOG}"
+                      log_message "MASTER" "Failed cluster list:${FAILED_CLUSTERS}" "${MASTER_LOG}"
+                      log_message "MASTER" "Status: PARTIAL_FAILURE" "${MASTER_LOG}"
+                    fi
+                    log_message "MASTER" "=========================================" "${MASTER_LOG}"
+
+                    # Upload logs to S3 with Aurora-specific path structure
+                    if [ -n "{{ S3BucketName }}" ]; then
+                      S3_LOG_PATH="s3://{{ S3BucketName }}/aurora-logs/$(date '+%Y-%m-%d')/${RunPreUpgradeTasks}-${TIMESTAMP}/"
+                      log_message "MASTER" "INFO: Uploading Aurora fleet logs to ${S3_LOG_PATH}" "${MASTER_LOG}"
+                      
+                      if aws s3 cp "${LOGS_DIR}" "${S3_LOG_PATH}" --recursive; then
+                        log_message "MASTER" "INFO: Aurora fleet logs uploaded successfully" "${MASTER_LOG}"
+                      else
+                        log_message "MASTER" "ERROR: Failed to upload Aurora fleet logs to S3" "${MASTER_LOG}"
+                      fi
+                    fi
+
+                    exit $EXIT_STATUS
+
+Outputs:
+  SSMDocumentName:
+    Description: Name of the SSM Automation Document
+    Value: !Ref AuroraPostgreSQLFleetUpgrade
+  SSMDocumentAssumeRoleArn:
+    Description: The ARN of the role that allows Automation to perform the actions on your behalf.
+    Value: !GetAtt AutomationServiceRole.Arn
