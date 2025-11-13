@@ -566,6 +566,25 @@ Resources:
         - Key: UpgradeDB
           Value: Y
 
+  AuroraReaderInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${ClusterIdentifier}-2'
+      DBInstanceClass: !Ref InstanceClass
+      Engine: aurora-postgresql
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBParameterGroupName: !Ref AuroraInstanceParameterGroup
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt EnhancedMonitoringRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterIdentifier}-2'
+        - Key: UpgradeDB
+          Value: Y
+
   # VPC Endpoints
   S3GatewayEndpoint:
     Type: 'AWS::EC2::VPCEndpoint'
@@ -696,6 +715,10 @@ Outputs:
   WriterInstanceId:
     Description: Aurora writer instance identifier
     Value: !Ref AuroraWriterInstance
+
+  ReaderInstanceId:
+    Description: Aurora reader instance identifier
+    Value: !Ref AuroraReaderInstance
 
   MasterUserSecretArn:
     Description: ARN of the master user secret
