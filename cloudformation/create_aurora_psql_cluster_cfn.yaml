@@ -240,6 +240,11 @@ Resources:
           ToPort: 80
           CidrIp: 0.0.0.0/0
           Description: Allow HTTP outbound for package updates
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !Ref AuroraSecurityGroup
+          Description: PostgreSQL access to Aurora
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-EC2-SG
