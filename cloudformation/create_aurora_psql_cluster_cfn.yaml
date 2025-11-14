@@ -365,12 +365,17 @@ Resources:
                 Action:
                   - rds:DescribeDBClusters
                   - rds:DescribeDBInstances
+                  - rds:CreateDBCluster
+                  - rds:CreateDBInstance
                   - rds:ModifyDBCluster
                   - rds:ModifyDBInstance
                   - rds:RebootDBInstance
                   - rds:CreateDBClusterSnapshot
                   - rds:DescribeDBClusterSnapshots
                   - rds:RestoreDBClusterFromSnapshot
+                  - rds:RestoreDBClusterToPointInTime
+                  - rds:DeleteDBCluster
+                  - rds:DeleteDBInstance
                   - rds:DescribeDBClusterParameterGroups
                   - rds:CreateDBClusterParameterGroup
                   - rds:ModifyDBClusterParameterGroup
