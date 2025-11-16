@@ -222,29 +222,13 @@ Resources:
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
-          CidrIp: !Ref VpcCIDR
-          Description: Management access
+          CidrIp: !Ref VpcCIDR 
       SecurityGroupEgress:
         - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          CidrIp: !Ref VpcCIDR
-          Description: Management access
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
+          FromPort: 0
+          ToPort: 65535
           CidrIp: 0.0.0.0/0
-          Description: Allow HTTPS outbound for SSM
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-          Description: Allow HTTP outbound for package updates
-        - IpProtocol: tcp
-          FromPort: 5432
-          ToPort: 5432
-          DestinationSecurityGroupId: !Ref AuroraSecurityGroup
-          Description: PostgreSQL access to Aurora
+          Description: Outbound access
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-EC2-SG

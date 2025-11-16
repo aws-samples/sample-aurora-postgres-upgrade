@@ -113,7 +113,7 @@ Resources:
             type: String
             description: Name of the S3 bucket containing the shell script and related log files can be stored
             default: ""
-          S3ScriptKey:
+          ShellScriptName:
             type: String
             description: The S3 key (path) to the shell script
             default: aurora_psql_patch.sh
@@ -162,7 +162,7 @@ Resources:
                     mkdir -p {{ ScriptsDirOnEC2 }}
 
                     # Download file
-                    aws s3 cp s3://{{ S3BucketName }}/{{ S3ScriptKey }} {{ ScriptsDirOnEC2 }}/aurora_psql_patch.sh
+                    aws s3 cp s3://{{ S3BucketName }}/{{ ShellScriptName }} {{ ScriptsDirOnEC2 }}/aurora_psql_patch.sh
 
                     # Make script executable
                     chmod +x {{ ScriptsDirOnEC2 }}/aurora_psql_patch.sh
