@@ -137,7 +137,7 @@ cluster_clone_required="${cluster_clone_required:-Y}"  # Default: Y - Create cop
 cluster_snapshot_required="${cluster_snapshot_required:-N}"  # Default: N - Create manual snapshots for MINOR upgrades (both phases) and MAJOR upgrades (PREUPGRADE phase only)
 cluster_parameter_modify="${cluster_parameter_modify:-N}"  # Default: N - Create new cluster parameter groups for MAJOR upgrades only (ignored for MINOR upgrades)
 instance_parameter_modify="${instance_parameter_modify:-N}"  # Default: N - Create new instance parameter groups for MAJOR upgrades only (ignored for MINOR upgrades)
-cluster_drop_replication_slot="${cluster_drop_replication_slot:-Y}"  # Default: N - Automatically drop REPLICATION SLOTS during MAJOR upgrades only (manual handling required when N)
+cluster_drop_replication_slot="${cluster_drop_replication_slot:-N}"  # Default: N - Automatically drop REPLICATION SLOTS during MAJOR upgrades only (manual handling required when N)
 
 # AWS Environment Configuration
 S3_BUCKET_PATCH_LOGS="${S3_BUCKET_PATCH_LOGS:-}"  # Default: empty - S3 bucket for storing upgrade logs (required for log storage)
