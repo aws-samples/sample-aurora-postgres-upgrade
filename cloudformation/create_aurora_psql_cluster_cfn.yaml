@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Create complete Aurora PostgreSQL testing environment with VPC, NAT Gateway, and all required components
+Description: Create complete Amazon Aurora PostgreSQL testing environment with VPC, NAT Gateway, and all required components
 
 Parameters:
   ClusterIdentifier:
@@ -9,7 +9,7 @@ Parameters:
 
   MasterUsername:
     Type: String
-    Description: Username for Aurora master user
+    Description: Username for Aurora administrative user
     Default: postgres
     NoEcho: true
     MinLength: 1
@@ -72,6 +72,7 @@ Parameters:
     Default: aurora-patch-test-scripts
     Description: Prefix for S3 bucket name
 
+  # AWS Systems Manager (SSM) Parameter Store parameter for latest AMI ID
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
@@ -146,6 +147,7 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-PrivateSubnet2
 
+  # WARNING: NAT Gateway incurs charges (~$0.045/hour, ~$32+/month) plus data processing fees
   # NAT Gateway Configuration
   NatGatewayEIP:
     Type: AWS::EC2::EIP
@@ -259,6 +261,7 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub ${EnvironmentName}-AuroraUpgradeTestSnsTopic
+      # KmsMasterKeyId is an AWS API property name and not subject to terminology replacement
       KmsMasterKeyId: alias/aws/sns
 
   AuroraUpgradeTestSnsTopicPolicy:
@@ -285,6 +288,24 @@ Resources:
       Protocol: email
       Endpoint: !Ref SnsEmailAddress
 
+  # S3 Access Logging Bucket
+  # Note: Access logging is not enabled on this bucket to avoid recursive logging.
+  S3LoggingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${BucketNamePrefix}-logs-${AWS::Region}-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
   # S3 Bucket
   S3Bucket:
     Type: AWS::S3::Bucket
@@ -292,6 +313,9 @@ Resources:
       BucketName: !Sub ${BucketNamePrefix}-${AWS::Region}-${AWS::AccountId}
       VersioningConfiguration:
         Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3LoggingBucket
+        LogFilePrefix: access-logs/
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -309,16 +333,20 @@ Resources:
       PolicyDocument:
         Version: 2012-10-17
         Statement:
-          Sid: DenyInsecureAccess
-          Action: "*"
-          Effect: Deny
-          Resource:
-            - !Sub arn:aws:s3:::${S3Bucket}
-            - !Sub arn:aws:s3:::${S3Bucket}/*
-          Condition:
-            Bool:
-              "aws:SecureTransport": false
-          Principal: "*"
+          - Sid: DenyInsecureAccess
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+              - s3:DeleteObject
+            Effect: Deny
+            Resource:
+              - !Sub arn:aws:s3:::${S3Bucket}
+              - !Sub arn:aws:s3:::${S3Bucket}/*
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+            Principal: "*"
 
   # IAM Roles and Policies
   InstanceRole:
@@ -344,7 +372,7 @@ Resources:
                 Action:
                   - rds:DescribeDBEngineVersions
                   - rds:DescribeOrderableDBInstanceOptions
-                Resource: '*'
+                Resource: !Sub 'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:*'
               - Effect: Allow
                 Action:
                   - rds:DescribeDBClusters
@@ -484,11 +512,40 @@ Resources:
         - Key: Name
           Value: !Sub ${ClusterIdentifier}-instance-param-group
 
+  # KMS Key for Secrets Manager encryption
+  # Note: The key policy grants the root account full KMS permissions (kms:*) which is the
+  # standard AWS pattern for key administration. Resource: '*' in a KMS key policy refers
+  # to the key itself (self-referential) and is required by AWS.
+  SecretsKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for encrypting Aurora secrets
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccountAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  SecretsKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${EnvironmentName}-secrets-key'
+      TargetKeyId: !Ref SecretsKmsKey
+
+  # Note: 'MasterUserSecret' is the CloudFormation logical resource name.
+  # The AWS RDS API uses 'Master' terminology in property names (MasterUsername, MasterUserPassword)
+  # which cannot be changed as they are AWS-defined property names.
   MasterUserSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Sub '${ClusterIdentifier}-master-user-secret'
-      Description: 'Master user credentials for Aurora PostgreSQL cluster'
+      Description: 'Administrative user credentials for Aurora PostgreSQL cluster'
+      KmsKeyId: !Ref SecretsKmsKey
       GenerateSecretString:
         SecretStringTemplate: !Sub '{"username": "${MasterUsername}"}'
         GenerateStringKey: 'password'
@@ -500,11 +557,12 @@ Resources:
     Properties:
       Name: !Sub ${ClusterIdentifier}-maintenance-user-secret
       Description: "Maintenance user credentials for Aurora PostgreSQL cluster"
+      KmsKeyId: !Ref SecretsKmsKey
       GenerateSecretString:
         SecretStringTemplate: '{"username": "aurora_maintenance_user"}'
         GenerateStringKey: "password"
         PasswordLength: 18
-        ExcludeCharacters: '"@/\'''
+        ExcludeCharacters: "\"@/\\'"
         ExcludePunctuation: true
 
   AuroraCluster:
@@ -517,9 +575,7 @@ Resources:
       Port: 5432
       DatabaseName: testdb
       MasterUsername: !Ref MasterUsername
-      ManageMasterUserPassword: true
-      MasterUserSecret:
-        SecretArn: !Ref MasterUserSecret
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${MasterUserSecret}:SecretString:password}}'
       DBClusterParameterGroupName: !Ref AuroraClusterParameterGroup
       DBSubnetGroupName: !Ref AuroraSubnetGroup
       VpcSecurityGroupIds:
@@ -530,6 +586,7 @@ Resources:
       EnableCloudwatchLogsExports:
         - postgresql
       StorageEncrypted: true
+      EnableIAMDatabaseAuthentication: true
       DeletionProtection: false
       Tags:
         - Key: Name
@@ -714,10 +771,18 @@ Outputs:
     Description: Aurora reader instance identifier
     Value: !Ref AuroraReaderInstance
 
-  MasterUserSecretArn:
-    Description: ARN of the master user secret
+  PrimaryUserSecretArn:
+    Description: ARN of the administrative user secret
     Value: !Ref MasterUserSecret
 
   MaintenanceUserSecretArn:
     Description: ARN of the maintenance user secret
     Value: !Ref MaintenanceUserSecret
+
+  StackCleanupInstructions:
+    Description: >-
+      To delete this stack and all resources, run:
+      aws cloudformation delete-stack --stack-name <stack-name>.
+      Ensure DeletionProtection is disabled on the Aurora cluster before deletion.
+      Note that S3 buckets must be emptied before stack deletion.
+    Value: !Sub 'aws cloudformation delete-stack --stack-name ${AWS::StackName}'

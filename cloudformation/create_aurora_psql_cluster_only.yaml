@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Aurora PostgreSQL cluster with maintenance user secret for upgrade automation testing'
+Description: 'Amazon Aurora PostgreSQL cluster with maintenance user secret for upgrade automation testing'
 
 Parameters:
   ClusterIdentifier:
@@ -14,7 +14,7 @@ Parameters:
     
   MasterUsername:
     Type: String
-    Description: Master username for Aurora cluster
+    Description: Administrative username for Aurora cluster
     Default: postgres
     
   EngineVersion:
@@ -56,7 +56,7 @@ Parameters:
     Default: 10.0.0.0/16
 
 Resources:
-  # Aurora Cluster Parameter Group
+  # Amazon Aurora Cluster Parameter Group
   AuroraClusterParameterGroup:
     Type: AWS::RDS::DBClusterParameterGroup
     Properties:
@@ -143,12 +143,38 @@ Resources:
           Value: !Sub '${ClusterIdentifier}-sg'
         - Key: Purpose
           Value: 'Aurora PostgreSQL upgrade automation'  
-# Master User Password Secret
-  MasterUserSecret:
+# Primary User Password Secret
+  # KMS Key for Secrets Manager encryption
+  # Note: The key policy grants the root account full KMS permissions (kms:*) which is the
+  # standard AWS pattern for key administration. Resource: '*' in a KMS key policy refers
+  # to the key itself (self-referential) and is required by AWS.
+  SecretsKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for encrypting Aurora secrets
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccountAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  SecretsKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ClusterIdentifier}-secrets-key'
+      TargetKeyId: !Ref SecretsKmsKey
+
+  PrimaryUserSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: !Sub '${ClusterIdentifier}-master-user-secret'
-      Description: 'Master user credentials for Aurora PostgreSQL cluster'
+      Name: !Sub '${ClusterIdentifier}-primary-user-secret'
+      Description: 'Primary user credentials for Aurora PostgreSQL cluster'
+      KmsKeyId: !Ref SecretsKmsKey
       GenerateSecretString:
         SecretStringTemplate: !Sub '{"username": "${MasterUsername}"}'
         GenerateStringKey: 'password'
@@ -156,7 +182,7 @@ Resources:
         ExcludeCharacters: '"@/\'
       Tags:
         - Key: Name
-          Value: !Sub '${ClusterIdentifier}-master-user-secret'
+          Value: !Sub '${ClusterIdentifier}-primary-user-secret'
         - Key: Purpose
           Value: 'Aurora PostgreSQL upgrade automation'
 
@@ -166,6 +192,7 @@ Resources:
     Properties:
       Name: !Sub '${ClusterIdentifier}-maintenance-user-secret'
       Description: 'Maintenance user credentials for Aurora PostgreSQL cluster upgrade automation'
+      KmsKeyId: !Ref SecretsKmsKey
       GenerateSecretString:
         SecretStringTemplate: '{"username": "aurora_maintenance_user"}'
         GenerateStringKey: "password"
@@ -209,8 +236,6 @@ Resources:
       DatabaseName: !Ref DatabaseName
       MasterUsername: !Ref MasterUsername
       ManageMasterUserPassword: true
-      MasterUserSecret:
-        SecretArn: !Ref MasterUserSecret
       DBClusterParameterGroupName: !Ref AuroraClusterParameterGroup
       DBSubnetGroupName: !Ref AuroraSubnetGroup
       VpcSecurityGroupIds:
@@ -221,6 +246,7 @@ Resources:
       EnableCloudwatchLogsExports:
         - postgresql
       StorageEncrypted: true
+      EnableIAMDatabaseAuthentication: true
       DeletionProtection: false
       Tags:
         - Key: Name
@@ -314,11 +340,11 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-ReaderInstanceId'
       
-  MasterUserSecretArn:
-    Description: ARN of the master user secret
-    Value: !Ref MasterUserSecret
+  PrimaryUserSecretArn:
+    Description: ARN of the primary user secret
+    Value: !Ref PrimaryUserSecret
     Export:
-      Name: !Sub '${AWS::StackName}-MasterUserSecretArn'
+      Name: !Sub '${AWS::StackName}-PrimaryUserSecretArn'
       
   MaintenanceUserSecretArn:
     Description: ARN of the maintenance user secret

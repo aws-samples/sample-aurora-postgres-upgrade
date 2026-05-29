@@ -1,8 +1,8 @@
 # Automate PostgreSQL Version Upgrades on Amazon Aurora
 
-Managing the lifecycle of your Aurora PostgreSQL cluster is essential for maintaining optimal performance, security, and feature access. Even with Amazon Aurora for PostgreSQL simplifying operations, version upgrades remain a critical task for database engineers, especially in large-scale deployments. Manual upgrades can introduce challenges such as extended downtime and potential human errors, both of which can disrupt application stability.
+Managing the lifecycle of your Amazon Aurora PostgreSQL cluster is essential for maintaining optimal performance, security, and feature access. Even with Amazon Aurora for PostgreSQL, version upgrades remain a critical task for database engineers, especially in large-scale deployments. Manual upgrades can introduce challenges such as extended downtime and potential human errors, both of which can disrupt application stability.
 
-Automation can help address these challenges. By leveraging AWS Command Line Interface (CLI) commands within a Unix shell script, you can automate the upgrade process, including prerequisite checks and upgrading a single Aurora cluster. To scale this approach for multiple clusters, you can integrate with AWS System Manager using Aurora cluster tag strategy to upgrade entire fleet of Aurora clusters across multiple environments—such as Development, Staging, and Production—in a consistent and automated manner.
+Automation can help address these challenges. By leveraging AWS Command Line Interface (CLI) commands within a Unix shell script, you can automate the upgrade process, including prerequisite checks and upgrading a single Aurora cluster. To scale this approach for multiple clusters, you can integrate with AWS Systems Manager using Aurora cluster tag strategy to upgrade entire fleet of Aurora clusters across multiple environments—such as Development, Staging, and Production—in a consistent and automated manner.
 
 This repository will guide you through setting up automation for pre-upgrade checks and upgrading one or more Aurora PostgreSQL clusters.
 
@@ -34,7 +34,7 @@ This repository will guide you through setting up automation for pre-upgrade che
 - Perform prerequisite checks before upgrading
 - Upgrade a single Aurora cluster
 - Scale the upgrade process to multiple Aurora PostgreSQL clusters
-- Integrate with AWS System Manager for fleet-wide upgrades
+- Integrate with AWS Systems Manager for fleet-wide upgrades
 - Copy-on-write cluster cloning for fast rollback capability
 - Comprehensive logging and monitoring
 
@@ -42,15 +42,17 @@ This repository will guide you through setting up automation for pre-upgrade che
 
 ## Architecture
 
-## Upgrade fleet of Aurora PostgreSQL clusters using AWS Systems Manager
+This solution supports two deployment patterns: fleet-wide upgrades using AWS Systems Manager for managing multiple clusters, and direct upgrades from EC2 for single cluster operations. The following diagrams illustrate both approaches.
+
+### Upgrade fleet of Aurora PostgreSQL clusters using AWS Systems Manager
 
 ![aurora-psql-patch-arch-ssm.png](./images/aurora-psql-patch-arch-ssm.png)
 
-      1. User connects to AWS Systems Manager console and execute automation job
-      2. Connects to S3 and downloads the upgrade shell script to ec2 instance
-      3. Connects to ec2 instance and identifies list of Aurora PostgreSQL clusters based on tag key/value pair: For e.g.: UpgradeDB = Y
+      1. User connects to AWS Systems Manager console and starts automation job
+      2. Connects to S3 and downloads the upgrade shell script to EC2 instance
+      3. Connects to EC2 instance and identifies list of Aurora PostgreSQL clusters based on tag key/value pair: For e.g.: UpgradeDB = Y
       4. For each Aurora PostgreSQL cluster identified, configures Aurora cluster to push DB and upgrade logs to CloudWatch if not configured already
-      5. Retrieves secret from secret manager
+      5. Retrieves secret from Secrets Manager
       6. Performs upgrade
       7. Pushes log files to S3
       8. Sends email notification.
@@ -59,9 +61,11 @@ This repository will guide you through setting up automation for pre-upgrade che
 
 ## Upgrade a single Aurora PostgreSQL cluster directly from EC2
 
+For single cluster upgrades, you can run the upgrade script directly from an EC2 instance without using AWS Systems Manager. This approach is suitable for one-off upgrades or testing scenarios.
+
 ![aurora-psql-patch-arch.png](./images/aurora-psql-patch-arch.png)
 
-      1. User connects to EC2 and executes the upgrade script
+      1. User connects to EC2 and runs the upgrade script
       2. Checks if Aurora cluster is valid
       3. Configures Aurora cluster to push DB and upgrade logs to CloudWatch if not configured already
       4. Retrieves secret from secret manager
@@ -99,9 +103,11 @@ This repository will guide you through setting up automation for pre-upgrade che
 
 <details>
 
-<summary><b>Click to expand/collapse Flow Charts</b></summary>
+<summary><b>Expand or collapse Flow Charts</b></summary>
 
 ## Flow Charts
+
+The following flow charts provide detailed step-by-step visualizations of the upgrade process for both deployment patterns.
 
 ### Upgrade fleet of Aurora PostgreSQL clusters using AWS Systems Manager
 ![aurora-psql-upgrade-flow-chart-fleet.png](./images/aurora-psql-upgrade-flow-chart-fleet.png)
@@ -114,6 +120,8 @@ This repository will guide you through setting up automation for pre-upgrade che
 <br>
 
 ## Setup
+
+> **Cost Advisory:** This solution creates AWS resources that incur costs, including NAT Gateways (~$0.045/hour plus data processing fees), EC2 instances, Aurora PostgreSQL clusters, and S3 storage. Review the [AWS Pricing](https://aws.amazon.com/pricing/) page for details. Be sure to clean up resources when they are no longer needed to avoid ongoing charges.
 
 ### Setup - Upgrade fleet of Aurora PostgreSQL clusters using AWS Systems Manager
 
@@ -164,7 +172,7 @@ This repository will guide you through setting up automation for pre-upgrade che
 
 2. Upload unix shell script *[aurora_psql_patch.sh]* from this repo to S3 bucket
 
-3. Create maintenance database user account in Aurora PostgreSQL cluster like below. This is required to create/drop replication slots, run analyze and vacuum commands, and upgrade pg extensions. This is to avoid using Aurora master user account.
+3. Create maintenance database user account in Aurora PostgreSQL cluster like below. This is required to create/drop replication slots, run analyze and vacuum commands, and upgrade pg extensions. This is to avoid using the Aurora administrative user account.
 
       ```
             CREATE USER aurora_maintenance_user WITH PASSWORD 'xxxxxxxxxxxxxxx';
@@ -226,7 +234,7 @@ This repository will guide you through setting up automation for pre-upgrade che
                   - For version 16.3, 17.4 thru 17.5 are valid major version upgrade paths.
       ```
 
-8. Execute SSM automation document "Aurora-PostgreSQL-Fleet-Upgrade"
+8. Run SSM automation document "Aurora-PostgreSQL-Fleet-Upgrade"
       - Identify major or minor version upgrade path as shown in the previous section
       - Provide appropriate input parameters. See below screenshots.
             -- Input parameters in SSM console
@@ -255,9 +263,9 @@ This repository will guide you through setting up automation for pre-upgrade che
    cd aurora-postgres-upgrade
    ```
 
-4. Grant execute permission on the shell script.
+4. Make the shell script executable.
 
-   ```
+   ```bash
    chmod u+x aurora_psql_patch.sh
    ```
 
@@ -265,7 +273,7 @@ This repository will guide you through setting up automation for pre-upgrade che
 
 6. Update environment variables in the shell script *[aurora_psql_patch.sh]*, if required (optional).
 
-7. Execute upgrade process.
+7. Run upgrade process.
 
       a. Set up log file location in the environment (optional).
          If this variable is not set, log files will not be copied over to S3 bucket.
@@ -281,7 +289,7 @@ This repository will guide you through setting up automation for pre-upgrade che
    
             e.g.: export SNS_TOPIC_ARN_EMAIL="arn:aws:sns:us-east-1:11111111111:sns-aurora-psql-patch-test-sns-topic"
            
-      c. Execute upgrade script.
+      c. Run upgrade script.
 
                ./aurora_psql_patch.sh [cluster-identifier] [next-engine-version] [run-pre-check]
    
@@ -293,7 +301,26 @@ This repository will guide you through setting up automation for pre-upgrade che
                Note: Review this document [https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraPostgreSQL.Updates.html]
                      for appropriate minor or major supported version (a.k.a appropriate upgrade path)
       
-8. Example Usage:
+8. Verify upgrade success.
+
+      After the upgrade completes, verify the cluster is healthy:
+
+      ```bash
+      # Confirm the new engine version
+      aws rds describe-db-clusters --db-cluster-identifier <cluster-id> \
+        --query 'DBClusters[0].EngineVersion' --output text
+
+      # Verify cluster status is 'available'
+      aws rds describe-db-clusters --db-cluster-identifier <cluster-id> \
+        --query 'DBClusters[0].Status' --output text
+
+      # Test database connectivity and confirm version
+      psql -h <cluster-endpoint> -U <username> -d <database> -c 'SELECT version();'
+      ```
+
+      Additionally, review the log files generated in the `logs/` directory for any errors or warnings.
+
+9. Example Usage:
    
            a. Preupgrade process execution:
 
@@ -310,7 +337,7 @@ This repository will guide you through setting up automation for pre-upgrade che
 <br>
 
 ## Testing
-To perform end-to-end testing of this process using AWS System Manager, perform below steps using AWS Console:
+To perform end-to-end testing of this process using AWS Systems Manager, perform below steps using AWS Console:
 
 **Note**: This will create VPC, subnets, routes, ec2, Aurora cluster, security groups, IAM policy/role, NAT, IGW, EIP and others. 
 
@@ -320,7 +347,7 @@ To perform end-to-end testing of this process using AWS System Manager, perform 
 
 3. Upload Aurora patch shell script [aurora_psql_patch.sh] to S3 bucket created in Step 1 above.
 
-4. Create maintenance database user account in Aurora PostgreSQL cluster like below. This is required to create/drop replication slots, run analyze and vacuum commands, and upgrade pg extensions. This is to avoid using Aurora master user account. 
+4. Create maintenance database user account in Aurora PostgreSQL cluster like below. This is required to create/drop replication slots, run analyze and vacuum commands, and upgrade pg extensions. This is to avoid using the Aurora administrative user account. 
 
 Note:
 Use the same password that is in the "<Aurora Cluster ID>-maintenance-user-secret" secret which would have been created during Step #1 above.
@@ -330,7 +357,7 @@ Use the same password that is in the "<Aurora Cluster ID>-maintenance-user-secre
             GRANT rds_superuser TO aurora_maintenance_user;
       ```
 
-5. Execute automation document from AWS Systems Manager console (as per Step 8 of the section "Upgrade fleet of Aurora PostgreSQL clusters using AWS Systems Manager").
+5. Run automation document from AWS Systems Manager console (as per Step 8 of the section "Upgrade fleet of Aurora PostgreSQL clusters using AWS Systems Manager").
 
 Note: 
 1. To create a replication slot in an Aurora PostgreSQL cluster, set rds.logical_replication=1 in the Aurora cluster parameter group and restart the cluster.
@@ -350,7 +377,7 @@ Below log files will be generated in the logs directory for each option
 
 |Log File Type|Sample File Name|Directory Path|Frequency|Purpose
 |---------------|---------------|-------------------|-------------------|-------------------           
-|Master Log|PREUPGRADE-master-20250321-21-55-51.log|[script-dir] is the directory where "aurora-psql-patch.sh" is saved|Each run|General information on pre-upgrade job tasks
+|Main Log|PREUPGRADE-main-20250321-21-55-51.log|[script-dir] is the directory where "aurora-psql-patch.sh" is saved|Each run|General information on pre-upgrade job tasks
 |Pre-upgrade Status log|PREUPGRADE-status|[script-dir]/logs|Each run|Pre-upgrade Job status
 |Pre-upgrade Execution Log|PREUPGRADE-20250321-21-51-48.log|[script-dir]/logs/[cluster-id]|Each run|Detail view of all pre-upgrade tasks
 |Freeze Task Log|PREUPGRADE-run_aurora_db_task_freeze-20250321-21-55-52.log|[script-dir]/logs/[cluster-id]|Each run|Log on Vacuum Freeze
@@ -362,7 +389,7 @@ Below log files will be generated in the logs directory for each option
 
 |Log File Type|Sample File Name|Directory Path|Frequency|Purpose/Error information
 |---------------|---------------|-------------------|-------------------|-------------------           
-|Master Log|UPGRADE-master-20250321-22-16-11.log|[script-dir]/logs|Each run|General information on upgrade tasks
+|Main Log|UPGRADE-main-20250321-22-16-11.log|[script-dir]/logs|Each run|General information on upgrade tasks
 |Upgrade Status log|UPGRADE-status|[script-dir]/logs/[cluster-id]|Each run|Upgrade Job Status
 |Upgrade Execution Log|UPGRADE-20250321-22-16-11.log|[script-dir]/logs/[cluster-id]|Each run|Detail view of all Upgrade tasks
 |Current Cluster Configuration Backup|cluster_current_config_backup_aurora-postgresql15-20250321-22-16-12.txt|[script-dir]/logs/[cluster-id]|Each run|Backup of current Aurora cluster configuration 
@@ -456,7 +483,79 @@ export cluster_drop_replication_slot="Y" # Auto-drop REPLICATION SLOTS for MAJOR
 
 ## Conclusion
 
-The scalable solution automates Aurora PostgreSQL pre-upgrade and upgrade tasks, reducing manual effort and potential errors. With built-in logging and optional email notifications, it provides real-time visibility and comprehensive tracking. The copy-on-write cloning feature provides fast rollback capability in case of upgrade issues. By optionally storing logs in S3, you benefit from a cost-effective solution that ensures logs are readily available for analysis, audits, and compliance purposes.
+The scalable solution automates Aurora PostgreSQL pre-upgrade and upgrade tasks, reducing manual effort and potential errors. With built-in logging and optional email notifications, it provides real-time visibility and comprehensive tracking. The copy-on-write cloning feature provides fast rollback capability in case of upgrade issues. By optionally storing logs in Amazon S3, you benefit from a cost-effective solution that makes logs readily available for analysis, audits, and compliance purposes.
+
+<br>
+
+## Clean up
+
+To avoid ongoing charges, delete the resources created by this solution when they are no longer needed. Follow these steps in order:
+
+> **WARNING: Data Loss Risk** — The cleanup commands below permanently delete Aurora clusters and their data without creating final snapshots. If you need to retain any data, create manual snapshots before proceeding or remove the `--skip-final-snapshot` flag.
+
+1. **Delete Aurora PostgreSQL cluster(s)**:
+   ```bash
+   # Delete cluster instances first
+   aws rds delete-db-instance \
+     --db-instance-identifier <instance-id> \
+     --skip-final-snapshot
+
+   # Then delete the cluster
+   aws rds delete-db-cluster \
+     --db-cluster-identifier <cluster-id> \
+     --skip-final-snapshot
+   ```
+
+2. **Delete copy-on-write clones** (if created during upgrade):
+   ```bash
+   aws rds delete-db-cluster \
+     --db-cluster-identifier <clone-cluster-id> \
+     --skip-final-snapshot
+   ```
+
+3. **Delete CloudFormation stacks**:
+   ```bash
+   # Delete SSM automation document stack
+   aws cloudformation delete-stack --stack-name <ssm-stack-name>
+
+   # Delete Aurora cluster stack (includes VPC, subnets, EC2, etc.)
+   aws cloudformation delete-stack --stack-name <aurora-stack-name>
+
+   # Wait for deletion to complete
+   aws cloudformation wait stack-delete-complete --stack-name <aurora-stack-name>
+   ```
+
+4. **Delete S3 bucket contents and bucket**:
+   ```bash
+   aws s3 rm s3://<bucket-name> --recursive
+   aws s3 rm s3://<logging-bucket-name> --recursive
+   aws s3 rb s3://<bucket-name>
+   aws s3 rb s3://<logging-bucket-name>
+   ```
+
+5. **Delete Secrets Manager secrets**:
+   ```bash
+   aws secretsmanager delete-secret \
+     --secret-id <secret-name> \
+     --force-delete-without-recovery
+   ```
+
+6. **Delete SNS topic** (if created):
+   ```bash
+   aws sns delete-topic --topic-arn <topic-arn>
+   ```
+
+7. **Delete CloudWatch log groups** (if persisting after stack deletion):
+   ```bash
+   aws logs delete-log-group --log-group-name /aws/rds/cluster/<cluster-id>/postgresql
+   ```
+
+8. **Schedule KMS key deletion** (if created by the stack):
+   ```bash
+   aws kms schedule-key-deletion \
+     --key-id <key-id> \
+     --pending-window-in-days 7
+   ```
 
 <br>
 

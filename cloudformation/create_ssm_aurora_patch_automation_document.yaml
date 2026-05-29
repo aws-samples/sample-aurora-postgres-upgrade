@@ -1,5 +1,15 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'CloudFormation template for Aurora PostgreSQL Fleet Upgrade Automation Document'
+Description: 'CloudFormation template for Amazon Aurora PostgreSQL Fleet Upgrade Automation Document'
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: Name of the S3 bucket containing scripts and log files
+    Default: ''
+  SnsTopicArn:
+    Type: String
+    Description: ARN of the SNS topic for email notifications
+    Default: ''
 
 Resources:
 
@@ -52,23 +62,30 @@ Resources:
                   - rds:ApplyPendingMaintenanceAction
                   - rds:AddTagsToResource
                   - rds:ListTagsForResource
-                Resource: '*'
+                Resource:
+                  - 'arn:aws:rds:*:*:cluster:*'
+                  - 'arn:aws:rds:*:*:db:*'
+                  - 'arn:aws:rds:*:*:cluster-snapshot:*'
+                  - 'arn:aws:rds:*:*:pg:*'
+                  - 'arn:aws:rds:*:*:cluster-pg:*'
               - Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
                   - secretsmanager:DescribeSecret
-                Resource: '*'
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*'
               - Effect: Allow
                 Action:
                   - s3:GetObject
                   - s3:PutObject
                   - s3:ListBucket
                   - s3:DeleteObject
-                Resource: '*'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3BucketName}'
+                  - !Sub 'arn:aws:s3:::${S3BucketName}/*'
               - Effect: Allow
                 Action:
                   - sns:Publish
-                Resource: '*'
+                Resource: !Ref SnsTopicArn
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
@@ -76,7 +93,9 @@ Resources:
                   - logs:PutLogEvents
                   - logs:DescribeLogGroups
                   - logs:DescribeLogStreams
-                Resource: '*'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*:log-stream:*'
 
   AuroraPostgreSQLFleetUpgrade:
     Type: AWS::SSM::Document
@@ -85,7 +104,7 @@ Resources:
       DocumentType: Automation
       Content:
         schemaVersion: '0.3'
-        description: Upgrade fleet of Aurora PostgreSQL clusters
+        description: Upgrade fleet of Amazon Aurora PostgreSQL clusters
         parameters:
           ScriptsDirOnEC2:
             type: String
@@ -194,25 +213,25 @@ Resources:
                     # Create logs directory with timestamp suffix
                     TIMESTAMP=$(date '+%Y%m%d-%H-%M-%S')
                     LOGS_DIR="{{ ScriptsDirOnEC2 }}/logs"
-                    MASTER_LOG="${LOGS_DIR}/${RunPreUpgradeTasks}-master-${TIMESTAMP}.log"
+                    MAIN_LOG="${LOGS_DIR}/${RunPreUpgradeTasks}-main-${TIMESTAMP}.log"
                     mkdir -p "${LOGS_DIR}"
 
                     # Store cluster list in a file to ensure consistency
                     CLUSTER_LIST_FILE="${LOGS_DIR}/${RunPreUpgradeTasks}-cluster_list.txt"
 
                     log_message() {
-                        local cluster="$1"
+                        local log_target="$1"
                         local message="$2"
                         local log_file="$3"
                         local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-                        echo "[${timestamp}] [${cluster}] ${message}" | tee -a "${log_file}"
+                        echo "[${timestamp}] [${log_target}] ${message}" | tee -a "${log_file}"
                     }
 
                     export TAG_KEY="{{ AuroraClusterTagKey }}"
                     export TAG_VALUE="{{ AuroraClusterTagValue }}"
                     
                     # Discover Aurora PostgreSQL clusters using describe-db-clusters with proper filtering
-                    log_message "MASTER" "Discovering Aurora PostgreSQL clusters with tag ${TAG_KEY}=${TAG_VALUE}" "${MASTER_LOG}"
+                    log_message "MAIN" "Discovering Aurora PostgreSQL clusters with tag ${TAG_KEY}=${TAG_VALUE}" "${MAIN_LOG}"
                     
                     aws rds describe-db-clusters --output json | \
                       jq -r --arg key "$TAG_KEY" --arg value "$TAG_VALUE" \
@@ -224,19 +243,20 @@ Resources:
                     
                     # Validate that clusters were found
                     if [ ! -s "${CLUSTER_LIST_FILE}" ]; then
-                      log_message "MASTER" "ERROR: No Aurora PostgreSQL clusters found with tag ${TAG_KEY}=${TAG_VALUE}" "${MASTER_LOG}"
+                      log_message "MAIN" "ERROR: No Aurora PostgreSQL clusters found with tag ${TAG_KEY}=${TAG_VALUE}" "${MAIN_LOG}"
                       exit 1
                     fi
 
                     CLUSTERS=$(cat "${CLUSTER_LIST_FILE}")
-                    log_message "MASTER" "Found Aurora clusters to upgrade: ${CLUSTERS}" "${MASTER_LOG}"
+                    log_message "MAIN" "Found Aurora clusters to upgrade: ${CLUSTERS}" "${MAIN_LOG}"
 
                     COUNT=0
                     declare -a PIDS=()
 
                     cleanup() {
-                      log_message "MASTER" "Cleaning up background processes..." "${MASTER_LOG}"
+                    log_message "MAIN" "Terminating background processes..." "${MAIN_LOG}"
                       for pid in "${PIDS[@]}"; do
+                        # Terminate background process
                         kill -9 $pid 2>/dev/null || true
                       done
                       exit 1
@@ -288,7 +308,7 @@ Resources:
                       ) &
                       PIDS+=($!)
                       COUNT=$((COUNT+1))
-                      log_message "MASTER" "Started ${RunPreUpgradeTasks} process for Aurora cluster ${CLUSTER} with PID ${PIDS[-1]}" "${MASTER_LOG}"
+                      log_message "MAIN" "Started ${RunPreUpgradeTasks} process for Aurora cluster ${CLUSTER} with PID ${PIDS[-1]}" "${MAIN_LOG}"
                       
                       # Add small delay between cluster processing starts to avoid overwhelming AWS APIs
                       sleep 2
@@ -303,7 +323,7 @@ Resources:
                       fi
                     done
 
-                    log_message "MASTER" "Aurora cluster ${RunPreUpgradeTasks} initiated for $COUNT clusters" "${MASTER_LOG}"
+                    log_message "MAIN" "Aurora cluster ${RunPreUpgradeTasks} initiated for $COUNT clusters" "${MAIN_LOG}"
 
                     # Logging summary for each Aurora cluster
                     while IFS= read -r CLUSTER || [[ -n "$CLUSTER" ]]; do
@@ -314,66 +334,66 @@ Resources:
                       CLUSTER_LOG="${CLUSTER_LOG_DIR}/${RunPreUpgradeTasks}-${TIMESTAMP}.log"
                       
                       if [ -f "${CLUSTER_LOG}" ]; then
-                        log_message "MASTER" "" "${MASTER_LOG}"
-                        log_message "MASTER" "===== Log summary for Aurora cluster: ${CLUSTER} =====" "${MASTER_LOG}"
+                        log_message "MAIN" "" "${MAIN_LOG}"
+                        log_message "MAIN" "===== Log summary for Aurora cluster: ${CLUSTER} =====" "${MAIN_LOG}"
                         
                         # Extract Aurora-specific log entries
                         while IFS= read -r line; do
-                          log_message "MASTER" "$line" "${MASTER_LOG}"
+                          log_message "MAIN" "$line" "${MAIN_LOG}"
                         done < <(egrep "INFO|ERROR|IMPORTANT|WARN|CLUSTER|AURORA" "${CLUSTER_LOG}" | egrep -v -i "vacuuming|pages|scanned|analyzing" || true)
                         
-                        log_message "MASTER" "===== End of log summary for Aurora cluster: ${CLUSTER} =====" "${MASTER_LOG}"
-                        log_message "MASTER" "" "${MASTER_LOG}"
+                        log_message "MAIN" "===== End of log summary for Aurora cluster: ${CLUSTER} =====" "${MAIN_LOG}"
+                        log_message "MAIN" "" "${MAIN_LOG}"
 
                         # Check Aurora cluster status
                         if [ -f "${CLUSTER_LOG_DIR}/${RunPreUpgradeTasks}-status" ]; then
                           STATUS=$(cat "${CLUSTER_LOG_DIR}/${RunPreUpgradeTasks}-status")
                           if [ "${STATUS}" = "FAILED" ]; then
                             FAILED_CLUSTERS="${FAILED_CLUSTERS} ${CLUSTER}"
-                            log_message "MASTER" "Aurora cluster ${CLUSTER}: ${RunPreUpgradeTasks} FAILED" "${MASTER_LOG}"
+                            log_message "MAIN" "Aurora cluster ${CLUSTER}: ${RunPreUpgradeTasks} FAILED" "${MAIN_LOG}"
                           else
-                            log_message "MASTER" "Aurora cluster ${CLUSTER}: ${RunPreUpgradeTasks} SUCCESS" "${MASTER_LOG}"
+                            log_message "MAIN" "Aurora cluster ${CLUSTER}: ${RunPreUpgradeTasks} SUCCESS" "${MAIN_LOG}"
                           fi
                         else
                           FAILED_CLUSTERS="${FAILED_CLUSTERS} ${CLUSTER}"
-                          log_message "MASTER" "Aurora cluster ${CLUSTER}: ${RunPreUpgradeTasks} STATUS UNKNOWN" "${MASTER_LOG}"
+                          log_message "MAIN" "Aurora cluster ${CLUSTER}: ${RunPreUpgradeTasks} STATUS UNKNOWN" "${MAIN_LOG}"
                         fi
                       else
-                        log_message "MASTER" "" "${MASTER_LOG}"
-                        log_message "MASTER" "WARNING: Log file not found for Aurora cluster ${CLUSTER}: ${CLUSTER_LOG}" "${MASTER_LOG}"
-                        log_message "MASTER" "" "${MASTER_LOG}"
+                        log_message "MAIN" "" "${MAIN_LOG}"
+                        log_message "MAIN" "WARNING: Log file not found for Aurora cluster ${CLUSTER}: ${CLUSTER_LOG}" "${MAIN_LOG}"
+                        log_message "MAIN" "" "${MAIN_LOG}"
                         FAILED_CLUSTERS="${FAILED_CLUSTERS} ${CLUSTER}"
                       fi
                     done < "${CLUSTER_LIST_FILE}"
 
                     # Final status summary for Aurora fleet
-                    log_message "MASTER" "" "${MASTER_LOG}"
-                    log_message "MASTER" "========== AURORA FLEET ${RunPreUpgradeTasks} SUMMARY ==========" "${MASTER_LOG}"
-                    log_message "MASTER" "Total Aurora clusters processed: $COUNT" "${MASTER_LOG}"
+                    log_message "MAIN" "" "${MAIN_LOG}"
+                    log_message "MAIN" "========== AURORA FLEET ${RunPreUpgradeTasks} SUMMARY ==========" "${MAIN_LOG}"
+                    log_message "MAIN" "Total Aurora clusters processed: $COUNT" "${MAIN_LOG}"
                     
                     if [ $EXIT_STATUS -eq 0 ] && [ -z "${FAILED_CLUSTERS}" ]; then
-                      log_message "MASTER" "INFO: All Aurora cluster ${RunPreUpgradeTasks} tasks completed successfully" "${MASTER_LOG}"
-                      log_message "MASTER" "Status: SUCCESS" "${MASTER_LOG}"
+                      log_message "MAIN" "INFO: All Aurora cluster ${RunPreUpgradeTasks} tasks completed successfully" "${MAIN_LOG}"
+                      log_message "MAIN" "Status: SUCCESS" "${MAIN_LOG}"
                     else
                       FAILED_COUNT=$(echo "${FAILED_CLUSTERS}" | wc -w)
                       SUCCESS_COUNT=$((COUNT - FAILED_COUNT))
-                      log_message "MASTER" "ERROR: Some Aurora cluster ${RunPreUpgradeTasks} tasks failed" "${MASTER_LOG}"
-                      log_message "MASTER" "Successful clusters: ${SUCCESS_COUNT}" "${MASTER_LOG}"
-                      log_message "MASTER" "Failed clusters: ${FAILED_COUNT}" "${MASTER_LOG}"
-                      log_message "MASTER" "Failed cluster list:${FAILED_CLUSTERS}" "${MASTER_LOG}"
-                      log_message "MASTER" "Status: PARTIAL_FAILURE" "${MASTER_LOG}"
+                      log_message "MAIN" "ERROR: Some Aurora cluster ${RunPreUpgradeTasks} tasks failed" "${MAIN_LOG}"
+                      log_message "MAIN" "Successful clusters: ${SUCCESS_COUNT}" "${MAIN_LOG}"
+                      log_message "MAIN" "Failed clusters: ${FAILED_COUNT}" "${MAIN_LOG}"
+                      log_message "MAIN" "Failed cluster list:${FAILED_CLUSTERS}" "${MAIN_LOG}"
+                      log_message "MAIN" "Status: PARTIAL_FAILURE" "${MAIN_LOG}"
                     fi
-                    log_message "MASTER" "=========================================" "${MASTER_LOG}"
+                    log_message "MAIN" "=========================================" "${MAIN_LOG}"
 
                     # Upload logs to S3 with Aurora-specific path structure
                     if [ -n "{{ S3BucketName }}" ]; then
                       S3_LOG_PATH="s3://{{ S3BucketName }}/aurora-logs/$(date '+%Y-%m-%d')/${RunPreUpgradeTasks}-${TIMESTAMP}/"
-                      log_message "MASTER" "INFO: Uploading Aurora fleet logs to ${S3_LOG_PATH}" "${MASTER_LOG}"
+                      log_message "MAIN" "INFO: Uploading Aurora fleet logs to ${S3_LOG_PATH}" "${MAIN_LOG}"
                       
                       if aws s3 cp "${LOGS_DIR}" "${S3_LOG_PATH}" --recursive; then
-                        log_message "MASTER" "INFO: Aurora fleet logs uploaded successfully" "${MASTER_LOG}"
+                        log_message "MAIN" "INFO: Aurora fleet logs uploaded successfully" "${MAIN_LOG}"
                       else
-                        log_message "MASTER" "ERROR: Failed to upload Aurora fleet logs to S3" "${MASTER_LOG}"
+                        log_message "MAIN" "ERROR: Failed to upload Aurora fleet logs to S3" "${MAIN_LOG}"
                       fi
                     fi
 

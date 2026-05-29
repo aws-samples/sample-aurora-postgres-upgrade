@@ -21,7 +21,7 @@
 #          - PREUPGRADE operations: No clone created (no database changes occur)
 #          - Clone naming: {cluster-id}-clone-{timestamp} for uniqueness
 #          - Rollback: Update connection strings to point to clone if upgrade fails
-#       4. This script can be executed standalone, outside of SSM. It can also be integrated into CI/CD pipelines 
+#       4. This script can be run standalone, outside of SSM. It can also be integrated into CI/CD pipelines 
 #          like CodeCommit, Jenkins, and other.
 #       5. Standalone version has been tested, but it still needs to be tested thoroughly in your non-prod environment.
 #       6. If running standalone, set SNS topic and S3 bucket name in the environment if email notification is required and
@@ -56,12 +56,12 @@
 #
 # Prerequisites:
 #     1. AWS Resources Required:
-#        - EC2 instance for running this script
-#        - IAM profile attached to EC2 instance with necessary permissions
+#        - Amazon EC2 instance for running this script
+#        - AWS IAM profile attached to Amazon EC2 instance with necessary permissions
 #              * create_aurora_psql_patch_iam_policy_role_cfn.yaml can be used to create a policy and role. 
 #                    ** Modify resource names appropriately
 #              * Attach this IAM role to ec2 instance.
-#        - Aurora PostgreSQL cluster with:
+#        - Amazon Aurora PostgreSQL cluster with:
 #              * VPC configuration
 #              * Subnet group(s)
 #              * Security group(s)
@@ -70,8 +70,8 @@
 #              * "create_aurora_psql_cluster_cfn.yaml" can be used (this creates cluster and instance parameter groups and Aurora cluster)
 #                    ** Modify resource names appropriately
 #        - AWS Secrets Manager secret attached to each Aurora cluster
-#        - S3 bucket for upgrade logs
-#        - SNS topic for notifications
+#        - Amazon S3 bucket for upgrade logs
+#        - Amazon SNS topic for notifications
 #
 #     2. Network Configuration:
 #        - Aurora cluster security group must allow inbound traffic from EC2 instance
@@ -140,6 +140,8 @@ instance_parameter_modify="${instance_parameter_modify:-N}"  # Default: N - Crea
 cluster_drop_replication_slot="${cluster_drop_replication_slot:-N}"  # Default: N - Automatically drop REPLICATION SLOTS during MAJOR upgrades only (manual handling required when N)
 
 # AWS Environment Configuration
+# Amazon SNS topic ARN for email notifications
+# Amazon S3 bucket for storing upgrade logs
 S3_BUCKET_PATCH_LOGS="${S3_BUCKET_PATCH_LOGS:-}"  # Default: empty - S3 bucket for storing upgrade logs (required for log storage)
 SNS_TOPIC_ARN_EMAIL="${SNS_TOPIC_ARN_EMAIL:-}"  # Default: empty - SNS topic ARN for email notifications (required for notifications)
 AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-west-2}"  # Default: us-west-2 - AWS region for Aurora operations
@@ -318,7 +320,7 @@ function wait_till_available_cluster() {
     local operation_type="${1:-upgrade}"  # upgrade, maintenance, reboot, snapshot
     local max_wait_minutes="${2:-120}"    # default 2 hours timeout
     
-    echo -e "\nINFO: Execute wait_till_available_cluster function for ${operation_type} operation...\n"
+    echo -e "\nINFO: Running wait_till_available_cluster function for ${operation_type} operation...\n"
     
     # Set operation-specific timeouts and wait intervals
     local wait_interval=60  # seconds between status checks
@@ -667,7 +669,7 @@ function create_instance_param_group() {
 
 # function to determine and validate parameter group assignment logic #
 function determine_parameter_group_assignment() {
-    echo -e "\nINFO: Execute determine_parameter_group_assignment function...\n"
+    echo -e "\nINFO: Running determine_parameter_group_assignment function...\n"
     
     local upgrade_scope="${1:-${UPGRADE_SCOPE}}"
     local validation_only="${2:-false}"
@@ -828,19 +830,19 @@ function cluster_upgrade() {
         log_aurora_cluster_context "INFO" "Major version upgrade flag will be applied" "cluster_upgrade"
     fi
     
-    log_aurora_cluster_context "INFO" "Executing Aurora cluster upgrade command" "cluster_upgrade"
+    log_aurora_cluster_context "INFO" "Running Aurora cluster upgrade command" "cluster_upgrade"
     log_aurora_cluster_context "INFO" "Command: ${AWS_CLI} rds modify-db-cluster ${modify_params[*]}" "cluster_upgrade"
     
     # Create structured log entry for upgrade start
     create_aurora_log_entry "cluster_upgrade" "started" "Aurora cluster upgrade initiated" "{\"from_version\":\"${current_engine_version}\",\"to_version\":\"${next_engine_version}\",\"upgrade_type\":\"${UPGRADE_SCOPE}\"}"
     
-    # Execute the modify-db-cluster command for upgrade
+    # Run the modify-db-cluster command for upgrade
     ${AWS_CLI} rds modify-db-cluster "${modify_params[@]}"
     return_value=$?
     
     log_aurora_cluster_context "INFO" "Aurora cluster upgrade command return value: ${return_value}" "cluster_upgrade"
     if [ "${return_value}" != "0" ]; then
-       log_aurora_error "Aurora cluster upgrade failed during modify-db-cluster execution" "${return_value}" "cluster_upgrade" "Check AWS CLI permissions and cluster configuration"
+       log_aurora_error "Aurora cluster upgrade failed during modify-db-cluster operation" "${return_value}" "cluster_upgrade" "Check AWS CLI permissions and cluster configuration"
        create_aurora_log_entry "cluster_upgrade" "failed" "Aurora cluster upgrade command failed" "{\"error_code\":\"${return_value}\"}"
        exit 1
     fi
@@ -976,7 +978,7 @@ function cluster_modify_logs() {
 # function to check pending maintenance status on Aurora cluster instances #
 function cluster_pending_maint() {
 
-    echo -e "\nINFO: Execute cluster_pending_maint function...\n"
+    echo -e "\nINFO: Running cluster_pending_maint function...\n"
     local return_value=""
     local maintenance_applied=false
     local failed_instances=()
@@ -1123,7 +1125,7 @@ function cluster_pending_maint() {
 
 # function to retrieve Aurora cluster creds from secret manager #
 function get_aurora_creds() {
-    echo -e "\nINFO: Execute get_aurora_creds function... \n"
+    echo -e "\nINFO: Running get_aurora_creds function... \n"
     
     # Call helper function to validate db_name
     check_db_name "${db_name}" || return $?
@@ -1163,17 +1165,45 @@ function get_aurora_creds() {
         return 1
     fi
 
-    export PGPASSWORD="${cluster_password}"
+    # Set up .pgpass file for secure credential handling (psql reads this automatically)
+    local pgpass_file="${HOME}/.pgpass"
+    
+    # Backup existing .pgpass if present
+    if [ -f "${pgpass_file}" ]; then
+        _pgpass_backup="${pgpass_file}.bak.$$"
+        cp "${pgpass_file}" "${_pgpass_backup}"
+    else
+        _pgpass_backup=""
+    fi
+    
+    # Write credentials to .pgpass (format: hostname:port:database:username:password)
+    echo "*:*:*:${cluster_username}:${cluster_password}" > "${pgpass_file}"
+    chmod 0600 "${pgpass_file}"
+    export PGPASSFILE="${pgpass_file}"
+    
     echo "INFO: Successfully retrieved Aurora cluster credentials"
     echo ""
     
     return 0
 }
+
+## Cleanup .pgpass file after use
+function cleanup_pgpass() {
+    local pgpass_file="${HOME}/.pgpass"
+    if [ -f "${pgpass_file}" ]; then
+        rm -f "${pgpass_file}"
+    fi
+    # Restore backup if it existed
+    if [ -n "${_pgpass_backup}" ] && [ -f "${_pgpass_backup}" ]; then
+        mv "${_pgpass_backup}" "${pgpass_file}"
+        _pgpass_backup=""
+    fi
+}
 ##-------------------------------------------------------------------------------------
 # run ANALYZE/VACUUM FREEZE commands on Aurora writer endpoint #
 function run_psql_command_aurora() {
 
-    echo -e "\nINFO: Execute run_psql_command_aurora function to run task: ${1} ...\n"
+    echo -e "\nINFO: Running run_psql_command_aurora function to run task: ${1} ...\n"
 
     # Call helper function to validate db_name
     check_db_name "${db_name}" || return $?
@@ -1201,7 +1231,7 @@ function run_psql_command_aurora() {
 
     {
         echo "================================================================"
-        echo "Aurora PostgreSQL Command Execution Log - Started at $(date)"
+        echo "Aurora PostgreSQL Command Run Log - Started at $(date)"
         echo "================================================================"
         echo "Command Type: ${1}"
         echo "Aurora Cluster: ${current_cluster_id}"
@@ -1221,18 +1251,18 @@ function run_psql_command_aurora() {
         fi
         echo "INFO: Aurora cluster writer endpoint connection successful"
 
-        # Execute command based on input parameter
+        # Run command based on input parameter
         case "${1}" in
             "ANALYZE")
-                echo -e "\nINFO: Executing ANALYZE VERBOSE command on Aurora cluster..."
+                echo -e "\nINFO: Running ANALYZE VERBOSE command on Aurora cluster..."
                 cmd="ANALYZE VERBOSE"
                 ;;
             "FREEZE")
-                echo -e "\nINFO: Executing VACUUM FREEZE VERBOSE command on Aurora cluster..."
+                echo -e "\nINFO: Running VACUUM FREEZE VERBOSE command on Aurora cluster..."
                 cmd="VACUUM FREEZE VERBOSE"
                 ;;
             "UNFREEZE")
-                echo -e "\nINFO: Executing VACUUM VERBOSE command on Aurora cluster..."
+                echo -e "\nINFO: Running VACUUM VERBOSE command on Aurora cluster..."
                 cmd="VACUUM VERBOSE"
                 ;;
             *)
@@ -1243,12 +1273,12 @@ function run_psql_command_aurora() {
                 ;;
         esac
 
-        # Log and execute the command
-        echo "Executing command: ${PSQL_BIN} -h ${cluster_writer_endpoint} -p ${cluster_port} -d ${db_name} -a -c '${cmd}'"
+        # Log and run the command
+        echo "Running command: ${PSQL_BIN} -h ${cluster_writer_endpoint} -p ${cluster_port} -d ${db_name} -a -c '${cmd}'"
         echo "----------------------------------------"
-        echo "Command execution started at: $(date)"
+        echo "Command run started at: $(date)"
         
-        # Execute PostgreSQL command on Aurora writer endpoint
+        # Run PostgreSQL command on Aurora writer endpoint
         if ! "${PSQL_BIN}" -U "${cluster_username}" -h "${cluster_writer_endpoint}" -p "${cluster_port}" \
             -d "${db_name}" -a -c "\timing on" -c "${cmd}" 2>&1
         then
@@ -1256,10 +1286,10 @@ function run_psql_command_aurora() {
             echo "Command failed with status: ${cmd_status}"
         fi
 
-        echo "Command execution completed at: $(date)"
+        echo "Command run completed at: $(date)"
         echo "----------------------------------------"
 
-        # Check command execution status
+        # Check command run status
         if [ "${cmd_status}" -eq 0 ]; then
             echo "SUCCESS: ${1} command completed successfully on Aurora cluster"
         else
@@ -1280,7 +1310,7 @@ function run_psql_command_aurora() {
 # drop REPLICATION SLOT in Aurora cluster if exists (applies to MAJOR VERSION UPGRADE only) #
 function run_psql_drop_repl_slot() {
 
-    echo -e "\nINFO: Execute run_psql_drop_repl_slot function...\n"
+    echo -e "\nINFO: Running run_psql_drop_repl_slot function...\n"
 
     # Call helper function to validate db_name
     check_db_name "${db_name}" || return $?
@@ -1410,7 +1440,7 @@ function copy_logs_to_s3() {
 
     if [ -n "${S3_BUCKET_PATCH_LOGS}" ]; then
 
-	   echo -e "\nINFO: Execute copy_logs_to_s3 function...\n"
+	   echo -e "\nINFO: Running copy_logs_to_s3 function...\n"
 
 	   echo -e "\nINFO: Copy Aurora cluster log files to S3"
 	   ${AWS_CLI} s3 sync "${LOGS_DIR}/" "s3://${S3_BUCKET_PATCH_LOGS}/"
@@ -1424,11 +1454,19 @@ function copy_logs_to_s3() {
 
 }
 ##-------------------------------------------------------------------------------------
+## Cleanup: Snapshot Resources
+## After upgrade is verified successful, delete manual snapshots that are no longer needed.
+## WARNING: Deleting snapshots is permanent and cannot be undone.
+##   aws rds delete-db-cluster-snapshot --db-cluster-snapshot-identifier <snapshot-id>
+## List all snapshots for a cluster:
+##   aws rds describe-db-cluster-snapshots --db-cluster-identifier <cluster-id> --query 'DBClusterSnapshots[].DBClusterSnapshotIdentifier'
+## Cost: Manual snapshots incur storage costs based on database size. Delete old snapshots regularly.
+##-------------------------------------------------------------------------------------
 
 # function to take Aurora cluster snapshot/backup if required #
 function cluster_snapshot() {
 
-    echo -e "\nINFO: Execute cluster_snapshot function...\n"
+    echo -e "\nINFO: Running cluster_snapshot function...\n"
     local return_value=""
     local snapshot_status=""
     local max_wait_minutes=60
@@ -1566,10 +1604,19 @@ function cluster_snapshot() {
 
 }
 ##-------------------------------------------------------------------------------------
+## Cleanup: Clone Resources
+## After upgrade is verified successful, delete clone clusters that are no longer needed.
+## WARNING: Deleting clones is permanent. Ensure upgrade is fully validated before cleanup.
+## Cost: Aurora clones initially share storage (copy-on-write) but diverge over time, increasing costs.
+##   aws rds delete-db-instance --db-instance-identifier <clone-instance-id> --skip-final-snapshot
+##   aws rds delete-db-cluster --db-cluster-identifier <clone-cluster-id> --skip-final-snapshot
+## List all clusters (to find clones):
+##   aws rds describe-db-clusters --query 'DBClusters[].DBClusterIdentifier'
+##-------------------------------------------------------------------------------------
 
 # function to create Aurora cluster clone (copy-on-write) before upgrade operations #
 function cluster_clone() {
-    echo -e "\nINFO: Execute cluster_clone function...\n"
+    echo -e "\nINFO: Running cluster_clone function...\n"
     
     local return_value=""
     local clone_status=""
@@ -1704,7 +1751,7 @@ function send_email() {
     local details="${2:-}"
     
     if [ -n "${SNS_TOPIC_ARN_EMAIL}" ]; then
-        echo -e "\nINFO: Execute send_email function with status: ${status}...\n"
+        echo -e "\nINFO: Running send_email function with status: ${status}...\n"
         
         # Build notification message
         local notification_message="Status: ${status}"
@@ -1756,7 +1803,7 @@ check_aurora_upgrade_version() {
     local cluster_id="$1"
     local target_version="$2"
     
-    echo -e "\nINFO: Execute check_aurora_upgrade_version function...\n"
+    echo -e "\nINFO: Running check_aurora_upgrade_version function...\n"
     echo "INFO: Validating Aurora PostgreSQL upgrade path compatibility..."
     echo "INFO: Aurora Cluster:     ${cluster_id}"
     echo "INFO: Current Version:    ${current_engine_version}"
@@ -1937,7 +1984,7 @@ function check_aurora_upgrade_type() {
 # function to update PostgreSQL extensions on Aurora cluster
 function update_extensions() {
 
-    echo -e "\nINFO: Execute update_extensions function...\n"
+    echo -e "\nINFO: Running update_extensions function...\n"
 
     # Call helper function to validate db_name
     check_db_name "${db_name}" || return $?
@@ -1960,14 +2007,14 @@ function update_extensions() {
     # Start logging
     {
         echo "================================================================"
-        echo "Execute update Aurora DB extensions Log - Started at $(date)"
+        echo "Running update Aurora DB extensions Log - Started at $(date)"
         echo "================================================================"
         echo "Aurora Cluster: ${current_cluster_id}"
         echo "Writer Endpoint: ${cluster_writer_endpoint}"
         echo "Log File: ${log_file}"
         echo "----------------------------------------------------------------"
 
-        echo -e "\nINFO: Execute update_extensions function on Aurora cluster..."
+        echo -e "\nINFO: Running update_extensions function on Aurora cluster..."
         echo -e "INFO: Started at $(date)"
 
         # Connect to the Aurora PostgreSQL cluster writer endpoint
@@ -1978,43 +2025,25 @@ function update_extensions() {
         fi
         echo "INFO: Aurora cluster writer endpoint connection successful"
 
-        # Update extensions using a PL/pgSQL anonymous code block
+        # Update extensions by generating and running ALTER EXTENSION statements
         echo -e "\nINFO: Starting extension updates on Aurora cluster..."
-        ${PSQL_BIN} -U "${cluster_username}" -h "${cluster_writer_endpoint}" -p "${cluster_port}" -d "${db_name}" <<EOF
-            \timing on
-            
-            SELECT current_timestamp AS "Start Time";
-
-            DO \$\$
-            DECLARE
-                rec RECORD;
-                newest_version TEXT;
-                extensions_updated BOOLEAN := FALSE;
-            BEGIN
-                FOR rec IN
-                    SELECT extname, extversion, (
-                        SELECT version newest_version
-                        FROM pg_available_extension_versions
-                        WHERE name = extname
-                        ORDER BY newest_version DESC
-                        LIMIT 1
-                    ) AS newest_version
-                    FROM pg_extension
-                LOOP
-                    IF rec.newest_version IS NOT NULL THEN
-                        EXECUTE 'ALTER EXTENSION ' || quote_ident(rec.extname) || ' UPDATE TO ' || quote_literal(rec.newest_version);
-                        RAISE NOTICE 'Updated extension % to version %', rec.extname, rec.newest_version;
-                        extensions_updated := TRUE;
-                    END IF;
-                END LOOP;
-
-                IF NOT extensions_updated THEN
-                    RAISE NOTICE 'No extensions were updated on Aurora cluster.';
-                END IF;
-            END\$\$;
-
-            SELECT current_timestamp AS "End Time";
+        extension_cmds=$(${PSQL_BIN} -U "${cluster_username}" -h "${cluster_writer_endpoint}" -p "${cluster_port}" -d "${db_name}" -t -A <<EOF
+            SELECT 'ALTER EXTENSION ' || quote_ident(e.extname) || ' UPDATE TO ' || quote_literal(av.version) || ';'
+            FROM pg_extension e
+            JOIN LATERAL (
+                SELECT version
+                FROM pg_available_extension_versions
+                WHERE name = e.extname
+                ORDER BY version DESC
+                LIMIT 1
+            ) av ON av.version IS NOT NULL;
 EOF
+        )
+        if [ -n "${extension_cmds}" ]; then
+            echo "${extension_cmds}" | ${PSQL_BIN} -U "${cluster_username}" -h "${cluster_writer_endpoint}" -p "${cluster_port}" -d "${db_name}"
+        else
+            echo "INFO: No extensions were updated on Aurora cluster."
+        fi
 
         if [ $? -ne 0 ]; then
             echo -e "\nERROR: Failed to update extensions on Aurora cluster. Please check and retry again. \n"
@@ -2035,11 +2064,11 @@ EOF
 }
 ##-------------------------------------------------------------------------------------
 
-## get Aurora cluster info #
-## get current engine type and engine version #
+## Get Aurora cluster info
+## Get current engine type and engine version
 
 function get_aurora_cluster_info() {
-    echo -e "\nINFO: Execute get_aurora_cluster_info function...\n"
+    echo -e "\nINFO: Running get_aurora_cluster_info function...\n"
     
     # Run the AWS CLI command and store the output
     cluster_info=$( ${AWS_CLI} rds describe-db-clusters --db-cluster-identifier ${current_cluster_id} --output json )
@@ -2750,7 +2779,7 @@ function create_aurora_log_entry_enhanced() {
         log_entry="${log_entry},\"instance_parameter_group\":\"${instance_param_group_name}\""
     fi
     
-    # Add environment and execution context
+    # Add environment and run context
     log_entry="${log_entry},\"script_pid\":$$"
     log_entry="${log_entry},\"aws_region\":\"${AWS_DEFAULT_REGION:-unknown}\""
     
@@ -2867,7 +2896,7 @@ function log_aurora_configuration_change() {
 echo ""
 
 ##-------------------------------------------------------------------------------------
-##------------------------EXECUTE AURORA POSTGRESQL UPGRADE/PATCHING TASKS----------------
+##-----------------------RUNNING Aurora PostgreSQL UPGRADE/PATCHING TASKS----------------
 ##-------------------------------------------------------------------------------------
 
 # Check for unix functions #
@@ -2894,7 +2923,7 @@ fi
 mkdir -p ${LOGS_DIR}/${current_cluster_id}
 
 ##-------------------------------------------------------------------------------------
-## Call function to get Aurora cluster info #
+## Call function to get Aurora cluster info
 log_aurora_operation_start "cluster_info_gathering" "Retrieving Aurora cluster information and validating configuration"
 get_aurora_cluster_info
 log_aurora_operation_complete "cluster_info_gathering" "success" "Aurora cluster information retrieved successfully"
@@ -2939,7 +2968,7 @@ if [ "${current_engine_type}" = "aurora-postgresql" ]; then
             # Step 1: For MAJOR upgrades - Take manual snapshot during PREUPGRADE phase
             log_aurora_cluster_context "INFO" "UPGRADE_SCOPE = ${UPGRADE_SCOPE}" "preupgrade" "MajorUpgrade"
             log_aurora_cluster_context "INFO" "Taking manual snapshot for major upgrade during PREUPGRADE phase" "preupgrade" "MajorUpgrade"
-            log_aurora_cluster_context "INFO" "Executing major version upgrade pre-requisite tasks" "preupgrade" "MajorUpgrade"
+            log_aurora_cluster_context "INFO" "Running major version upgrade pre-requisite tasks" "preupgrade" "MajorUpgrade"
 
             # Take snapshot FIRST for major upgrades during PREUPGRADE
             cluster_snapshot
@@ -2968,7 +2997,7 @@ if [ "${current_engine_type}" = "aurora-postgresql" ]; then
         # For UPGRADE phase, determine parameter group strategy based on upgrade scope
         if [ "${UPGRADE_SCOPE}" = "MINOR" ]; then
             log_aurora_cluster_context "INFO" "UPGRADE_SCOPE = ${UPGRADE_SCOPE}" "upgrade" "MinorUpgrade"
-            log_aurora_cluster_context "INFO" "Executing minor version upgrade tasks" "upgrade" "MinorUpgrade"
+            log_aurora_cluster_context "INFO" "Running minor version upgrade tasks" "upgrade" "MinorUpgrade"
             
             # Step 1: Take manual snapshot FIRST for minor upgrades (if not done in PREUPGRADE)
             log_aurora_cluster_context "INFO" "Taking manual snapshot for minor upgrade (before upgrade)" "upgrade" "MinorUpgrade"
@@ -2989,7 +3018,7 @@ if [ "${current_engine_type}" = "aurora-postgresql" ]; then
         # Handle MAJOR version upgrades
         if [ "${UPGRADE_SCOPE}" = "MAJOR" ]; then
             log_aurora_cluster_context "INFO" "UPGRADE_SCOPE = ${UPGRADE_SCOPE}" "upgrade" "MajorUpgrade"
-            log_aurora_cluster_context "INFO" "Executing major version upgrade tasks" "upgrade" "MajorUpgrade"
+            log_aurora_cluster_context "INFO" "Running major version upgrade tasks" "upgrade" "MajorUpgrade"
 
             # Step 1: NO manual snapshot for major upgrades during UPGRADE phase (Aurora creates automatic snapshot)
             log_aurora_cluster_context "INFO" "Skipping manual snapshot for major upgrade during UPGRADE phase (Aurora creates automatic snapshot)" "upgrade" "MajorUpgrade"
@@ -3053,6 +3082,6 @@ log_aurora_cluster_context "INFO" "Aurora PostgreSQL upgrade workflow completed 
 create_aurora_log_entry "workflow_complete" "success" "Aurora PostgreSQL upgrade workflow completed" "{\"email_subject\":\"${EMAIL_SUBJECT}\"}"
 
 # Generate comprehensive session summary
-generate_aurora_session_summary "success" "Aurora PostgreSQL upgrade workflow completed successfully. All operations executed without errors."
+generate_aurora_session_summary "success" "Aurora PostgreSQL upgrade workflow completed successfully. All operations ran without errors."
 
 exit 0
