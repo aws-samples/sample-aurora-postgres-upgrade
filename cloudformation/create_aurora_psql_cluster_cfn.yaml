@@ -335,14 +335,31 @@ Resources:
         Statement:
           - Sid: DenyInsecureAccess
             Action:
-              - s3:GetObject
-              - s3:PutObject
-              - s3:ListBucket
-              - s3:DeleteObject
+              - s3:*
             Effect: Deny
             Resource:
               - !Sub arn:aws:s3:::${S3Bucket}
               - !Sub arn:aws:s3:::${S3Bucket}/*
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+            Principal: "*"
+
+  # Enforce TLS-only access on the access-logging bucket (ACAT S3 secure-transport finding)
+  S3LoggingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3LoggingBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: DenyInsecureAccess
+            Action:
+              - s3:*
+            Effect: Deny
+            Resource:
+              - !Sub arn:aws:s3:::${S3LoggingBucket}
+              - !Sub arn:aws:s3:::${S3LoggingBucket}/*
             Condition:
               Bool:
                 "aws:SecureTransport": false
